@@ -4,11 +4,11 @@ services:
     container_name: xiaoya-search-tool
     restart: unless-stopped
     ports:
-      - "5666:5000"
+      - "5666:5666"
     volumes:
       # 挂载宿主机的 index.txt 文件到容器内，默认为 /etc/xiaoya/index.txt
       # 请根据实际情况修改宿主机路径，例如：/path/to/your/xiaoya/index.txt:/etc/xiaoya/index.txt
-      - /etc/xiaoya/index.txt:/etc/xiaoya/index.txt:ro
+      - /data/app/g-box/index/index.txt:/etc/xiaoya/index.txt:ro
     env_file:
       - .env
     environment:
