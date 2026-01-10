@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>小雅资源一键转存</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100 min-h-screen p-8">
+    <div class="max-w-3xl mx-auto bg-white rounded-xl shadow-md p-6">
+        <h1 class="text-2xl font-bold text-gray-800 mb-6 text-center">🎬 小雅资源助手</h1>
+
+        <div class="flex gap-2 mb-8">
+            <input type="text" id="keyword" placeholder="输入影视名称..."
+                   class="flex-1 border border-gray-300 rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <button onclick="search()" id="searchBtn" class="bg-blue-600 text-white px-6 py-2 rounded-lg hover:bg-blue-700 transition">搜索</button>
+        </div>
+
+        <div id="loading" class="hidden text-center text-gray-500 my-4">正在从海量资源中搜寻...</div>
+        <ul id="results" class="divide-y divide-gray-200"></ul>
+    </div>
+
+    <script>
+        async function search() {
+            const keyword = document.getElementById('keyword').value;
+            if (!keyword) return alert('请输入关键词');
+
+            const btn = document.getElementById('searchBtn');
+            const list = document.getElementById('results');
+            const loading = document.getElementById('loading');
+
+            list.innerHTML = '';
+            loading.classList.remove('hidden');
+            btn.disabled = true;
+
+            const res = await fetch('/api/search', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({keyword})
+            });
+            const data = await res.json();
+
+            loading.classList.add('hidden');
+            btn.disabled = false;
+
+            if (data.status === 'success') {
+                data.results.forEach(item => {
+                    const li = document.createElement('li');
+                    li.className = 'py-4 flex justify-between items-center';
+                    li.innerHTML = `
+                        <div class="flex-1 pr-4">
+                            <p class="text-gray-800 font-medium break-all">${item.name}</p>
+                            <p class="text-xs text-gray-400 mt-1">${item.path}</p>
+                        </div>
+                        <button onclick="transfer('${item.path}')" class="bg-green-500 text-white text-sm px-4 py-1 rounded hover:bg-green-600 transition">一键转存</button>
+                    `;
+                    list.appendChild(li);
+                });
+            } else {
+                alert('搜索失败: ' + data.message);
+            }
+        }
+
+        async function transfer(path) {
+            const res = await fetch('/api/transfer', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({path})
+            });
+            const data = await res.json();
+            alert(data.message);
+        }
+    </script>
+</body>
+</html>
