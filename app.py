@@ -95,7 +95,7 @@ def transfer():
 
     payload = {
         "src_dir": src_dir,
-        "src_filenames": [name],
+        "names": [name],
         "dst_dir": DEST_PATH
     }
     print(f"Payload: {payload}") # Debug payload
