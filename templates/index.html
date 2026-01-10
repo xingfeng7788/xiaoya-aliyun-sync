@@ -44,15 +44,17 @@
             btn.disabled = false;
 
             if (data.status === 'success') {
-                data.results.forEach(item => {
+                // 将结果存入全局变量以便后续引用
+                window.currentResults = data.results;
+                
+                data.results.forEach((item, index) => {
                     const li = document.createElement('li');
                     li.className = 'py-4 flex justify-between items-center';
                     li.innerHTML = `
                         <div class="flex-1 pr-4">
                             <p class="text-gray-800 font-medium break-all">${item.name}</p>
-                            <p class="text-xs text-gray-400 mt-1">${item.path}</p>
                         </div>
-                        <button onclick="transfer('${item.path}')" class="bg-green-500 text-white text-sm px-4 py-1 rounded hover:bg-green-600 transition">一键转存</button>
+                        <button onclick="transferByIndex(${index})" class="bg-green-500 text-white text-sm px-4 py-1 rounded hover:bg-green-600 transition shrink-0">一键转存</button>
                     `;
                     list.appendChild(li);
                 });
@@ -61,14 +63,36 @@
             }
         }
 
-        async function transfer(path) {
-            const res = await fetch('/api/transfer', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({path})
-            });
-            const data = await res.json();
-            alert(data.message);
+        async function transferByIndex(index) {
+            const item = window.currentResults[index];
+            if (!item) return;
+            
+            // 禁用按钮防止重复点击
+            const buttons = document.querySelectorAll('button');
+            const targetBtn = Array.from(buttons).find(b => b.textContent === '一键转存' && b.getAttribute('onclick') === `transferByIndex(${index})`);
+            if (targetBtn) {
+                targetBtn.disabled = true;
+                targetBtn.classList.replace('bg-green-500', 'bg-gray-400');
+                targetBtn.textContent = '转存中...';
+            }
+
+            try {
+                const res = await fetch('/api/transfer', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({path: item.path})
+                });
+                const data = await res.json();
+                alert(data.message);
+            } catch (e) {
+                alert('请求失败');
+            } finally {
+                if (targetBtn) {
+                    targetBtn.disabled = false;
+                    targetBtn.classList.replace('bg-gray-400', 'bg-green-500');
+                    targetBtn.textContent = '一键转存';
+                }
+            }
         }
     </script>
 </body>

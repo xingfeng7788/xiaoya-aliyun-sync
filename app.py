@@ -78,15 +78,19 @@ def transfer():
     # 1. 清理路径：去除 # 及之后的内容
     clean_path = raw_path.split('#')[0]
     
-    # 2. 格式化路径：确保以 / 开头 (去掉开头的 . )
+    # 2. 格式化路径：确保以 / 开头 (去掉开头的 . )，并去除结尾的 /
     if clean_path.startswith('.'):
         clean_path = clean_path[1:]
     if not clean_path.startswith('/'):
         clean_path = '/' + clean_path
+    clean_path = clean_path.rstrip('/')
 
     print(f"Transferring: {clean_path}") # Debug log
 
     name = clean_path.split('/')[-1]
+    if not name:
+         return jsonify({"status": "error", "message": "无法解析文件名 (path invalid)"})
+
     src_dir = os.path.dirname(clean_path)
 
     payload = {
@@ -94,6 +98,7 @@ def transfer():
         "src_filenames": [name],
         "dst_dir": DEST_PATH
     }
+    print(f"Payload: {payload}") # Debug payload
     
     headers = {'Authorization': ADMIN_TOKEN}
     
