@@ -63,22 +63,51 @@ def search():
 
 @app.route('/api/transfer', methods=['POST'])
 def transfer():
-    # 转存逻辑与之前一致
-    full_path = request.json.get('path')
-    name = full_path.split('/')[-1]
-    src_dir = os.path.dirname(full_path)  # 自动提取父目录
+    # 原始路径，可能包含 # 后的元数据
+    raw_path = request.json.get('path', '')
+    
+    # 1. 清理路径：去除 # 及之后的内容
+    clean_path = raw_path.split('#')[0]
+    
+    # 2. 格式化路径：确保以 / 开头 (去掉开头的 . )
+    if clean_path.startswith('.'):
+        clean_path = clean_path[1:]
+    if not clean_path.startswith('/'):
+        clean_path = '/' + clean_path
+
+    print(f"Transferring: {clean_path}") # Debug log
+
+    name = clean_path.split('/')[-1]
+    src_dir = os.path.dirname(clean_path)
 
     payload = {
         "src_dir": src_dir,
         "src_filenames": [name],
         "dst_dir": DEST_PATH
     }
-    res = requests.post(f"{ALIST_URL}/api/fs/copy", json=payload,
-                        headers={'Authorization': ADMIN_TOKEN}).json()
+    
+    headers = {'Authorization': ADMIN_TOKEN}
+    
+    try:
+        response = requests.post(f"{ALIST_URL}/api/fs/copy", json=payload, headers=headers)
+        
+        # 尝试解析 JSON
+        try:
+            res_json = response.json()
+        except ValueError:
+            # 如果不是 JSON，打印原始内容并报错
+            print(f"Error: Alist response is not JSON. Status: {response.status_code}")
+            print(f"Response text: {response.text}")
+            return jsonify({"status": "error", "message": f"Alist API error: {response.status_code} - {response.text[:200]}"})
 
-    if res.get('code') == 200:
-        return jsonify({"status": "success", "message": "转存指令已发送"})
-    return jsonify({"status": "error", "message": res.get('message')})
+        if res_json.get('code') == 200:
+            return jsonify({"status": "success", "message": "转存指令已发送"})
+        else:
+            return jsonify({"status": "error", "message": res_json.get('message', 'Unknown error')})
+
+    except Exception as e:
+        print(f"Exception during transfer: {str(e)}")
+        return jsonify({"status": "error", "message": str(e)})
 
 
 if __name__ == '__main__':
