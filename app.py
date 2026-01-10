@@ -51,10 +51,19 @@ def search():
     # 限制返回前 100 条，防止前端卡死
     results = []
     count = 0
-    for path in XIAOYA_INDEX:
-        if keyword.lower() in path.lower():
-            name = path.split('/')[-1]  # 取路径最后一部分作为名称
-            results.append({"name": name, "path": path})
+    for line in XIAOYA_INDEX:
+        if keyword.lower() in line.lower():
+            # 1. 提取实际路径（去掉 # 后的元数据）
+            full_path = line.split('#')[0]
+            # 2. 清理显示名称（去掉开头的 .）
+            display_name = full_path
+            if display_name.startswith('.'):
+                display_name = display_name[1:]
+            
+            results.append({
+                "name": display_name,  # 显示用的路径
+                "path": line           # 原始完整行，传给 transfer 接口
+            })
             count += 1
         if count >= 100: break
 
