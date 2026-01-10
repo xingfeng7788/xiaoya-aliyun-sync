@@ -70,52 +70,90 @@ def search():
     return jsonify({"status": "success", "results": results})
 
 
+def get_file_list(path):
+    """调用 Alist API 获取目录下文件列表"""
+    payload = {
+        "path": path,
+        "password": "",
+        "page": 1,
+        "per_page": 0,
+        "refresh": False
+    }
+    try:
+        res = requests.post(f"{ALIST_URL}/api/fs/list", json=payload, 
+                          headers={'Authorization': ADMIN_TOKEN})
+        data = res.json()
+        if data.get('code') == 200 and data.get('data') and data['data'].get('content'):
+            return [item['name'] for item in data['data']['content']]
+    except Exception as e:
+        print(f"List files error: {e}")
+    return None
+
 @app.route('/api/transfer', methods=['POST'])
 def transfer():
-    # 原始路径，可能包含 # 后的元数据
+    # 原始路径处理
     raw_path = request.json.get('path', '')
-    
-    # 1. 清理路径：去除 # 及之后的内容
     clean_path = raw_path.split('#')[0]
-    
-    # 2. 格式化路径：确保以 / 开头 (去掉开头的 . )，并去除结尾的 /
     if clean_path.startswith('.'):
         clean_path = clean_path[1:]
     if not clean_path.startswith('/'):
         clean_path = '/' + clean_path
     clean_path = clean_path.rstrip('/')
 
-    print(f"Transferring: {clean_path}") # Debug log
+    folder_name = clean_path.split('/')[-1]
+    if not folder_name:
+         return jsonify({"status": "error", "message": "无法解析文件名"})
 
-    name = clean_path.split('/')[-1]
-    if not name:
-         return jsonify({"status": "error", "message": "无法解析文件名 (path invalid)"})
+    print(f"Transferring: {clean_path}")
 
-    src_dir = os.path.dirname(clean_path)
-
-    payload = {
-        "src_dir": src_dir,
-        "names": [name],
-        "dst_dir": DEST_PATH
-    }
-    print(f"Payload: {payload}") # Debug payload
+    # --- 智能穿透策略 ---
+    # 1. 尝试列出该路径下的内容
+    # 如果能列出内容，说明是文件夹，且我们获取到了具体文件列表
+    # 这样我们可以直接复制“里面的东西”，而不是复制“文件夹本身”，规避虚拟目录问题
+    children_names = get_file_list(clean_path)
     
     headers = {'Authorization': ADMIN_TOKEN}
-    
+
+    if children_names:
+        # 策略 A: 是文件夹，且获取到了内容 -> 复制内容到目标文件夹
+        print(f"Smart Mode: Found {len(children_names)} items inside. Copying content directly.")
+        
+        # 目标路径需要加上文件夹名，例如 /我的网盘/来自小雅/遮天
+        target_dst_dir = os.path.join(DEST_PATH, folder_name)
+        
+        payload = {
+            "src_dir": clean_path,       # 源目录就是用户点的这个文件夹
+            "names": children_names,     # 复制里面的所有文件名
+            "dst_dir": target_dst_dir    # 目标目录是设定的存盘路径+文件夹名
+        }
+    else:
+        # 策略 B: 是文件，或者空文件夹，或者列目录失败 -> 只能按原方式复制本体
+        print("Standard Mode: Copying item itself.")
+        src_dir = os.path.dirname(clean_path)
+        payload = {
+            "src_dir": src_dir,
+            "names": [folder_name],
+            "dst_dir": DEST_PATH
+        }
+
+    print(f"Payload: {payload}")
+
     try:
+        # 注意：如果目标文件夹不存在，Alist 的 Copy API 通常会自动创建，
+        # 但如果是深层目录可能需要确保父级存在。通常 Alist 处理得很好。
         response = requests.post(f"{ALIST_URL}/api/fs/copy", json=payload, headers=headers)
         
-        # 尝试解析 JSON
         try:
             res_json = response.json()
+            print(f"Alist Response: {res_json}")
         except ValueError:
-            # 如果不是 JSON，打印原始内容并报错
             print(f"Error: Alist response is not JSON. Status: {response.status_code}")
-            print(f"Response text: {response.text}")
-            return jsonify({"status": "error", "message": f"Alist API error: {response.status_code} - {response.text[:200]}"})
+            return jsonify({"status": "error", "message": f"Alist API error: {response.status_code}"})
 
         if res_json.get('code') == 200:
-            return jsonify({"status": "success", "message": "转存指令已发送"})
+            msg = f"转存任务已提交！包含 {len(children_names) if children_names else 1} 个项目。"
+            msg += " 请在 Alist 后台【管理-任务】中查看进度。"
+            return jsonify({"status": "success", "message": msg})
         else:
             return jsonify({"status": "error", "message": res_json.get('message', 'Unknown error')})
 
