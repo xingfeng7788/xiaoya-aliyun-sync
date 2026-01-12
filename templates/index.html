@@ -26,9 +26,43 @@
 
         <div id="loading" class="hidden text-center text-gray-500 my-4">正在从海量资源中搜寻...</div>
         <ul id="results" class="divide-y divide-gray-200"></ul>
+
+        <!-- 阿里云盘管理 -->
+        <div class="mt-12 border-t pt-8">
+            <h2 class="text-xl font-bold text-gray-800 mb-4 flex items-center justify-between">
+                <span>📂 阿里云盘管理</span>
+                <span class="text-sm text-gray-500 font-normal" id="currentPath">/</span>
+            </h2>
+            
+            <div class="flex gap-2 mb-4">
+                <button onclick="loadAliFiles('root')" class="bg-gray-200 text-gray-700 px-3 py-1 rounded hover:bg-gray-300 text-sm">🏠 根目录</button>
+                <button onclick="goUp()" id="btnUp" class="bg-gray-200 text-gray-700 px-3 py-1 rounded hover:bg-gray-300 text-sm hidden">⬆️ 上一级</button>
+                <div class="flex-1"></div>
+                <button onclick="downloadSelected()" class="bg-blue-600 text-white px-4 py-1 rounded hover:bg-blue-700 text-sm">📥 下载选中到服务器</button>
+            </div>
+
+            <div class="border rounded-lg overflow-hidden">
+                <table class="min-w-full divide-y divide-gray-200">
+                    <thead class="bg-gray-50">
+                        <tr>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-10">
+                                <input type="checkbox" onchange="toggleAll(this)" class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                            </th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">名称</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-24">大小</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-40">时间</th>
+                        </tr>
+                    </thead>
+                    <tbody id="aliFiles" class="bg-white divide-y divide-gray-200">
+                        <tr><td colspan="4" class="px-4 py-4 text-center text-gray-500">请点击根目录加载文件...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
     </div>
 
     <script>
+        // --- 搜索功能 ---
         async function search() {
             const keyword = document.getElementById('keyword').value;
             if (!keyword) return alert('请输入关键词');
@@ -52,9 +86,7 @@
             btn.disabled = false;
 
             if (data.status === 'success') {
-                // 将结果存入全局变量以便后续引用
                 window.currentResults = data.results;
-                
                 data.results.forEach((item, index) => {
                     const li = document.createElement('li');
                     li.className = 'py-4 flex justify-between items-center';
@@ -75,8 +107,6 @@
         async function transferByIndex(index) {
             const item = window.currentResults[index];
             if (!item) return;
-            
-            // 禁用按钮防止重复点击
             const buttons = document.querySelectorAll('button');
             const targetBtn = Array.from(buttons).find(b => b.textContent === '一键转存' && b.getAttribute('onclick') === `transferByIndex(${index})`);
             if (targetBtn) {
@@ -84,7 +114,6 @@
                 targetBtn.classList.replace('bg-green-500', 'bg-gray-400');
                 targetBtn.textContent = '转存中...';
             }
-
             try {
                 const res = await fetch('/api/transfer', {
                     method: 'POST',
@@ -103,6 +132,163 @@
                 }
             }
         }
+
+        // --- 阿里云盘管理功能 ---
+        let currentDriveId = null;
+        let currentParentId = 'root';
+        let parentHistory = []; // 简单的历史记录栈
+        
+        async function loadAliFiles(parentId, isUp = false) {
+            const tbody = document.getElementById('aliFiles');
+            tbody.innerHTML = '<tr><td colspan="4" class="px-4 py-4 text-center text-gray-500">加载中...</td></tr>';
+            
+            try {
+                const res = await fetch('/api/aliyun/files', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        parent_file_id: parentId,
+                        drive_id: currentDriveId
+                    })
+                });
+                const data = await res.json();
+                
+                if (data.status === 'success') {
+                    currentDriveId = data.drive_id;
+                    
+                    // 处理历史记录
+                    if (!isUp && parentId !== currentParentId) {
+                         if (parentId === 'root') {
+                             parentHistory = [];
+                         } else {
+                             parentHistory.push(currentParentId);
+                         }
+                    } else if (isUp) {
+                        // 已经在 goUp 中处理了 pop
+                    }
+                    currentParentId = parentId;
+
+                    // 更新 UI
+                    renderFiles(data.files);
+                    updateBreadcrumb(data.current_folder);
+                    document.getElementById('btnUp').classList.toggle('hidden', currentParentId === 'root');
+                } else {
+                    tbody.innerHTML = `<tr><td colspan="4" class="px-4 py-4 text-center text-red-500">${data.message}</td></tr>`;
+                }
+            } catch (e) {
+                tbody.innerHTML = `<tr><td colspan="4" class="px-4 py-4 text-center text-red-500">加载失败: ${e}</td></tr>`;
+            }
+        }
+
+        function renderFiles(files) {
+            const tbody = document.getElementById('aliFiles');
+            if (files.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="4" class="px-4 py-4 text-center text-gray-500">空文件夹</td></tr>';
+                return;
+            }
+            
+            tbody.innerHTML = files.map(f => {
+                const icon = f.type === 'folder' ? '📁' : '📄';
+                const size = f.type === 'folder' ? '-' : formatSize(f.size);
+                
+                let nameClick = '';
+                let nameClass = '';
+                
+                if (f.type === 'folder') {
+                    nameClick = `onclick="loadAliFiles('${f.file_id}')"`;
+                    nameClass = 'text-blue-600 hover:underline cursor-pointer';
+                } else {
+                    // 文件类型，点击下载
+                    nameClick = `onclick="browserDownload('${f.file_id}', '${f.name}')"`;
+                    nameClass = 'text-green-600 hover:underline cursor-pointer';
+                }
+                
+                return `
+                    <tr class="hover:bg-gray-50">
+                        <td class="px-4 py-3 whitespace-nowrap">
+                            <input type="checkbox" name="aliFile" value="${f.file_id}" class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                        </td>
+                        <td class="px-4 py-3 whitespace-nowrap">
+                            <span ${nameClick} class="${nameClass} flex items-center gap-2" title="${f.type === 'folder' ? '进入文件夹' : '点击下载'}">
+                                <span>${icon}</span>
+                                <span class="truncate max-w-xs" title="${f.name}">${f.name}</span>
+                            </span>
+                        </td>
+                        <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-500">${size}</td>
+                        <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-500">${f.updated_at.split(' ')[0]}</td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        function browserDownload(fileId, fileName) {
+            // 使用 iframe 或 window.open 触发下载，避免页内跳转
+            // 构建代理 URL
+            const url = `/api/aliyun/proxy?file_id=${fileId}&file_name=${encodeURIComponent(fileName)}&drive_id=${currentDriveId || ''}`;
+            window.open(url, '_blank');
+        }
+
+        function goUp() {
+            if (parentHistory.length > 0) {
+                const prev = parentHistory.pop();
+                loadAliFiles(prev, true);
+            } else {
+                loadAliFiles('root');
+            }
+        }
+
+        function updateBreadcrumb(currentFolder) {
+            const el = document.getElementById('currentPath');
+            if (!currentFolder || currentFolder.name === 'root') {
+                el.textContent = '/';
+            } else {
+                el.textContent = `... / ${currentFolder.name}`;
+            }
+        }
+
+        function toggleAll(source) {
+            const checkboxes = document.getElementsByName('aliFile');
+            for(let i=0, n=checkboxes.length;i<n;i++) {
+                checkboxes[i].checked = source.checked;
+            }
+        }
+        
+        function formatSize(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        async function downloadSelected() {
+            const checkboxes = document.querySelectorAll('input[name="aliFile"]:checked');
+            const ids = Array.from(checkboxes).map(cb => cb.value);
+            
+            if (ids.length === 0) return alert('请先选择要下载的文件或文件夹');
+            
+            if (!confirm(`确定要下载选中的 ${ids.length} 个项目到服务器吗？`)) return;
+            
+            try {
+                const res = await fetch('/api/aliyun/download', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        file_ids: ids,
+                        drive_id: currentDriveId
+                    })
+                });
+                const data = await res.json();
+                alert(data.message);
+                // 取消勾选
+                checkboxes.forEach(cb => cb.checked = false);
+            } catch (e) {
+                alert('下载请求失败');
+            }
+        }
+        
+        // 初始加载
+        // loadAliFiles('root'); 
     </script>
 </body>
 </html>

@@ -3,7 +3,7 @@ import json
 import traceback
 
 import requests
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, Response, stream_with_context
 from dotenv import load_dotenv
 from urllib.parse import unquote
 from bs4 import BeautifulSoup
@@ -26,6 +26,8 @@ PORT = int(os.getenv("PORT", 5000))
 ALI_REFRESH_TOKEN = os.getenv("ALI_REFRESH_TOKEN", "")
 # 目标文件夹 ID，默认为根目录
 ALI_TARGET_FOLDER_ID = os.getenv("ALI_TARGET_FOLDER_ID", "root")
+# 下载目录，默认为 /downloads (对应 docker-compose 中的挂载)
+ALI_DOWNLOAD_PATH = os.getenv("ALI_DOWNLOAD_PATH", "/downloads")
 
 # 全局初始化 Aligo 实例
 # 注意：第一次启动时，如果没有 refresh_token，aligo 可能会在控制台打印二维码
@@ -39,6 +41,168 @@ def get_ali():
             print("警告: 未设置 ALI_REFRESH_TOKEN，Aligo 将进入扫码模式")
         _ali_instance = Aligo(refresh_token=ALI_REFRESH_TOKEN)
     return _ali_instance
+
+
+@app.route('/api/aliyun/files', methods=['POST'])
+def aliyun_files():
+    """获取阿里云盘文件列表"""
+    parent_file_id = request.json.get('parent_file_id', 'root')
+    drive_id = request.json.get('drive_id')
+    
+    try:
+        ali = get_ali()
+        # 如果未提供 drive_id，使用默认 drive_id
+        if not drive_id:
+            drive_id = ali.default_drive_id
+
+        # 获取文件列表
+        files = ali.get_file_list(parent_file_id=parent_file_id, drive_id=drive_id)
+        
+        # 序列化结果
+        file_list = []
+        for f in files:
+            file_list.append({
+                'file_id': f.file_id,
+                'name': f.name,
+                'type': f.type,  # 'file' or 'folder'
+                'size': f.size,
+                'updated_at': str(f.updated_at),
+                'drive_id': f.drive_id
+            })
+            
+        # 获取当前文件夹信息（用于面包屑等，如果不是 root）
+        current_folder = None
+        if parent_file_id != 'root':
+            f = ali.get_file(file_id=parent_file_id)
+            if f:
+                current_folder = {'file_id': f.file_id, 'name': f.name, 'parent_file_id': f.parent_file_id}
+        
+        return jsonify({
+            "status": "success", 
+            "files": file_list, 
+            "current_folder": current_folder,
+            "drive_id": drive_id
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"status": "error", "message": str(e)})
+
+
+import threading
+
+def background_download(ali, file_ids, drive_id):
+    """后台下载任务"""
+    try:
+        print(f"Starting download for {len(file_ids)} files to {ALI_DOWNLOAD_PATH}")
+        if not os.path.exists(ALI_DOWNLOAD_PATH):
+            os.makedirs(ALI_DOWNLOAD_PATH)
+
+        # 1. 获取文件对象 (Download 需要 BaseFile 对象或类似结构)
+        # aligo.download_files 需要 BaseFile 对象列表
+        # 我们可以先批量获取文件信息
+        # 这里的 batch_get_files 返回的是 BatchSubResponse 列表
+        batch_responses = ali.batch_get_files(file_ids, drive_id=drive_id)
+        
+        target_files = []
+        for resp in batch_responses:
+            if resp.body and hasattr(resp.body, 'file_id'):
+                 target_files.append(resp.body)
+        
+        if not target_files:
+            print("No valid files found to download.")
+            return
+
+        # 2. 执行下载
+        # 区分文件和文件夹
+        # download_files 只能下载文件，download_folder 下载文件夹
+        # 我们遍历处理
+        
+        for f in target_files:
+            try:
+                if f.type == 'file':
+                    ali.download_file(file=f, local_folder=ALI_DOWNLOAD_PATH)
+                elif f.type == 'folder':
+                    ali.download_folder(f.file_id, local_folder=ALI_DOWNLOAD_PATH)
+            except Exception as e:
+                print(f"Download failed for {f.name}: {e}")
+
+        print("Download task completed.")
+    except Exception as e:
+        print(f"Background download error: {e}")
+
+
+@app.route('/api/aliyun/download', methods=['POST'])
+def aliyun_download():
+    """下载选中文件到宿主机映射目录"""
+    file_ids = request.json.get('file_ids', [])
+    drive_id = request.json.get('drive_id')
+
+    if not file_ids:
+        return jsonify({"status": "error", "message": "未选择任何文件"})
+
+    try:
+        ali = get_ali()
+        # 启动后台线程下载
+        thread = threading.Thread(target=background_download, args=(ali, file_ids, drive_id))
+        thread.start()
+        
+        return jsonify({
+            "status": "success", 
+            "message": f"已开始下载 {len(file_ids)} 个任务到服务器 {ALI_DOWNLOAD_PATH} 目录"
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)})
+
+
+@app.route('/api/aliyun/proxy', methods=['GET'])
+def aliyun_proxy():
+    """代理下载阿里云盘文件 (解决 Referer 问题)"""
+    file_id = request.args.get('file_id')
+    drive_id = request.args.get('drive_id')
+    file_name = request.args.get('file_name', 'downloaded_file')
+
+    if not file_id:
+        return "Missing file_id", 400
+
+    try:
+        ali = get_ali()
+        # 1. 获取下载链接
+        download_info = ali.get_download_url(file_id=file_id, drive_id=drive_id)
+        
+        if not download_info or not download_info.url:
+            return "Failed to get download URL", 500
+
+        # 2. 请求文件内容 (带 Referer)
+        headers = {
+            'Referer': 'https://www.aliyundrive.com/',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36'
+        }
+        
+        # 3. 流式传输
+        req = requests.get(download_info.url, headers=headers, stream=True)
+        
+        if req.status_code != 200:
+            return f"Upstream error: {req.status_code}", req.status_code
+
+        def generate():
+            for chunk in req.iter_content(chunk_size=1024 * 1024): # 1MB chunks
+                yield chunk
+
+        # 4. 构建响应，透传 Headers
+        response = Response(stream_with_context(generate()), status=200)
+        response.headers['Content-Type'] = req.headers.get('Content-Type', 'application/octet-stream')
+        response.headers['Content-Length'] = req.headers.get('Content-Length')
+        
+        # 处理文件名编码 (简单处理，通常浏览器能自动识别 UTF-8)
+        from urllib.parse import quote
+        encoded_filename = quote(file_name)
+        response.headers['Content-Disposition'] = f"attachment; filename*=UTF-8''{encoded_filename}"
+        
+        return response
+
+    except Exception as e:
+        traceback.print_exc()
+        return f"Proxy error: {str(e)}", 500
 
 
 def get_alist_storages():
