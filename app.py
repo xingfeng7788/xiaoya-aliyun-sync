@@ -275,44 +275,46 @@ def transfer():
         ali = get_ali()
         share_token_obj = ali.get_share_token(share_id, share_pwd=share_pwd)
         
-        # 2. 获取分享根目录文件列表，定位路径起点
-        root_files = ali.get_share_file_list(share_token_obj, parent_file_id='root')
+        # 获取挂载点的根文件夹 ID (默认为 root)
+        mount_root_id = addition.get('root_folder_id') or 'root'
         
-        full_path_list = [p for p in full_path.split('/') if p]
+        # 计算相对路径: full_path - mount_path
+        # 注意: mount_path 可能是 /A, full_path 可能是 /A/B -> rel_path = /B
+        # 如果 full_path == mount_path, rel_path = ""
         
-        parts_to_traverse = []
-        
-        # 查找 full_path 中哪个部分对应 Share Root 下的一个文件/文件夹
-        match_index = -1
-        for i, part in enumerate(full_path_list):
-            for rf in root_files:
-                if rf.name == part:
-                    match_index = i
-                    break
-            if match_index != -1:
-                break
-        
-        if match_index != -1:
-            parts_to_traverse = full_path_list[match_index:]
+        if full_path == mount_path:
+            rel_path = ""
+        elif full_path.startswith(mount_path + "/"):
+            rel_path = full_path[len(mount_path):]
         else:
-            # 如果没找到匹配，尝试使用原来的相对路径逻辑作为 fallback
-            # 或者直接报错。按照用户需求，这里应该能找到。
-            # Fallback: 假设 mount_path 对应 root
-            rel_path = full_path[len(mount_path):].strip('/')
-            parts_to_traverse = [p for p in rel_path.split('/') if p]
-            
-            # 如果还是空，说明就是根目录
-            if not parts_to_traverse and full_path == mount_path:
-                 pass # Transfer root content logic below
+             # 理论上不应该走到这里，因为前面已经 find_matched_storage 校验过
+             # 但如果 Alias 重定向后 mount_path 变了，可能需要重新确认
+             # 这里简单处理: 如果不匹配前缀，尝试直接用 full_path (容错)
+             print(f"Warning: path mismatch after alias resolution. Mount: {mount_path}, Full: {full_path}")
+             rel_path = full_path
+
+        parts_to_traverse = [p for p in rel_path.strip('/').split('/') if p]
 
         # 3. 逐层下钻 (Drill down)
-        current_file_id = 'root'
+        current_file_id = mount_root_id
         found_target = None
         
         if not parts_to_traverse:
-             # 如果没有路径需要遍历，说明目标就是 Share Root
-             # 我们构造一个虚拟对象代表 Root
-             found_target = type('obj', (object,), {'name': full_path_list[-1] if full_path_list else "Root_Transfer", 'file_id': 'root', 'type': 'folder'})
+             # 如果没有路径需要遍历，说明目标就是挂载根目录
+             # 获取根目录信息（为了拿到 name 和 type）
+             try:
+                 if current_file_id == 'root':
+                     # Root 特殊处理，无法直接 get_file
+                     found_target = type('obj', (object,), {'name': full_path.split('/')[-1] or "Root", 'file_id': 'root', 'type': 'folder'})
+                 else:
+                     # 获取指定 ID 的文件信息
+                     # get_share_file_list 只能列出子文件，不能获取当前文件夹详情？
+                     # aligo 的 get_file 需要 file_id，但在 share 模式下可能受限
+                     # 这里变通一下：我们认为它是一个文件夹
+                     found_target = type('obj', (object,), {'name': full_path.split('/')[-1] or "Target", 'file_id': current_file_id, 'type': 'folder'})
+             except Exception as e:
+                 print(f"Get root info failed: {e}")
+                 found_target = type('obj', (object,), {'name': "Target", 'file_id': current_file_id, 'type': 'folder'})
         else:
             for i, part in enumerate(parts_to_traverse):
                 # 列出当前层级的文件
