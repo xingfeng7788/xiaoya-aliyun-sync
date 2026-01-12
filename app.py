@@ -146,6 +146,35 @@ def recursive_share_transfer(ali, share_token_obj, source_parent_id, target_pare
         print(f"Recursive transfer failed for {source_parent_id}: {e}")
 
 
+def find_matched_storage(target_path, storage_data):
+    """
+    根据目标路径匹配 AList 的挂载存储 (最长前缀匹配)
+    """
+    # 格式化路径，确保以 / 开头，且末尾处理一致
+    best_match = None
+    max_len = -1
+
+    for item in storage_data:
+        mount_path, driver = item['mount_path'], item['driver']
+        # 处理根目录匹配情况
+        formatted_mount = "/" + mount_path.strip("/")
+        if mount_path == "/":
+            formatted_mount = "/"
+
+        # 检查 target_path 是否以挂载点开头
+        # 注意：为了防止 /movie1 匹配到 /movie，通常会在末尾加 / 判断或精确匹配
+        check_path = target_path + "/"
+        check_mount = formatted_mount if formatted_mount == "/" else formatted_mount + "/"
+
+        if check_path.startswith(check_mount):
+            # 记录匹配长度最长的那个
+            if len(formatted_mount) > max_len:
+                max_len = len(formatted_mount)
+                best_match = item
+
+    return best_match
+
+
 @app.route('/api/transfer', methods=['POST'])
 def transfer():
     full_path = request.json.get('path', '').split('#')[0]
@@ -155,17 +184,20 @@ def transfer():
     full_path = full_path.rstrip('/')
 
     # 1. 获取所有存储并匹配 (用于获取 share_id)
-    storages = get_alist_storages()
-    matched_storage = None
-    mount_path = ""
-
-    for s in storages:
-        m_path = s.get('mount_path')
-        if not m_path: continue
-        if full_path == m_path or full_path.startswith(m_path + '/'):
-            if len(m_path) > len(mount_path):
-                mount_path = m_path
-                matched_storage = s
+    # storages = get_alist_storages()
+    storages = [ga for ga in get_alist_storages() if ga['driver'] == 'AliyundriveShare2Open']
+    # for storage in storages:
+    #     print(storage['mount_path'], storage['id'])
+    matched_storage = find_matched_storage(full_path, storages)
+    # mount_path = ""
+    #
+    # for s in storages:
+    #     m_path = s.get('mount_path')
+    #     if not m_path: continue
+    #     if full_path == m_path or full_path.startswith(m_path + '/'):
+    #         if len(m_path) > len(mount_path):
+    #             mount_path = m_path
+    #             matched_storage = s
 
     if not matched_storage:
         return jsonify({"status": "error", "message": "未找到对应的存储挂载，请确认路径是否正确"})
