@@ -61,6 +61,7 @@
                     li.innerHTML = `
                         <div class="flex-1 pr-4">
                             <p class="text-gray-800 font-medium break-all">${item.name}</p>
+                            <a href="${item.url}" target="_blank" class="text-xs text-blue-500 hover:underline break-all mt-1 block" title="点击跳转到小雅">${item.path}</a>
                         </div>
                         <button onclick="transferByIndex(${index})" class="bg-green-500 text-white text-sm px-4 py-1 rounded hover:bg-green-600 transition shrink-0">一键转存</button>
                     `;

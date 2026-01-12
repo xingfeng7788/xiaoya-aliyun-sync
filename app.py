@@ -92,11 +92,58 @@ def search():
             if candidate not in seen_paths:
                 if any(x in candidate for x in ['/@manage', '/@login']): continue
                 seen_paths.add(candidate)
-                results.append({"name": candidate.split('/')[-1], "path": candidate})
+                results.append({
+                    "name": candidate.split('/')[-1], 
+                    "path": candidate,
+                    "url": f"{XIAOYA_URL.rstrip('/')}{candidate}"
+                })
 
         return jsonify({"status": "success", "results": results[:100]})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)})
+
+
+def recursive_share_transfer(ali, share_token_obj, source_parent_id, target_parent_id):
+    """
+    递归转存分享文件
+    :param ali: Aligo 实例
+    :param share_token_obj: 分享 token 对象
+    :param source_parent_id: 分享中的源文件夹 ID
+    :param target_parent_id: 也就是保存到的目标文件夹 ID
+    """
+    try:
+        # 获取源文件夹下的所有内容
+        children = ali.get_share_file_list(share_token_obj, parent_file_id=source_parent_id)
+        
+        files = []
+        folders = []
+        
+        for child in children:
+            if child.type == 'file':
+                files.append(child)
+            else:
+                folders.append(child)
+                
+        # 1. 批量转存文件
+        if files:
+            file_ids = [f.file_id for f in files]
+            try:
+                ali.batch_share_file_saveto_drive(file_ids, share_token_obj, target_parent_id)
+            except Exception as e:
+                print(f"Batch transfer files failed: {e}")
+                
+        # 2. 递归处理文件夹
+        for folder in folders:
+            try:
+                # 在目标目录创建对应的新文件夹
+                new_folder = ali.create_folder(folder.name, target_parent_id)
+                if new_folder:
+                    # 递归转存
+                    recursive_share_transfer(ali, share_token_obj, folder.file_id, new_folder.file_id)
+            except Exception as e:
+                print(f"Process folder {folder.name} failed: {e}")
+    except Exception as e:
+        print(f"Recursive transfer failed for {source_parent_id}: {e}")
 
 
 @app.route('/api/transfer', methods=['POST'])
@@ -198,36 +245,39 @@ def transfer():
              return jsonify({"status": "error", "message": "无法定位目标文件"})
 
         target_name = found_target.name
-        transfer_file_ids = []
         save_to_parent_id = ALI_TARGET_FOLDER_ID
         
         # 如果是文件：创建同名文件夹（去后缀），转存该文件
         if getattr(found_target, 'type', 'folder') == 'file':
             target_name = os.path.splitext(target_name)[0]
             transfer_file_ids = [found_target.file_id]
-        else:
-            # 如果是文件夹：创建同名文件夹，转存该文件夹下的所有子内容
-            # 获取子内容
-            children = ali.get_share_file_list(share_token_obj, parent_file_id=found_target.file_id)
-            transfer_file_ids = [c.file_id for c in children]
             
-            if not transfer_file_ids:
-                 return jsonify({"status": "success", "message": "目标文件夹为空，无需转存。"})
-
-        # 创建目标目录
-        try:
-            new_folder = ali.create_folder(target_name, ALI_TARGET_FOLDER_ID)
-            if new_folder:
-                save_to_parent_id = new_folder.file_id
-        except Exception as create_err:
-            print(f"Create folder failed: {create_err}")
-
-        # 批量转存
-        ali.batch_share_file_saveto_drive(transfer_file_ids, share_token_obj, save_to_parent_id)
+            # 创建目标目录
+            try:
+                new_folder = ali.create_folder(target_name, ALI_TARGET_FOLDER_ID)
+                if new_folder:
+                    save_to_parent_id = new_folder.file_id
+                    ali.batch_share_file_saveto_drive(transfer_file_ids, share_token_obj, save_to_parent_id)
+            except Exception as create_err:
+                print(f"Create folder or transfer file failed: {create_err}")
+                
+        else:
+            # 如果是文件夹（或 Root）：创建同名文件夹，递归转存
+            try:
+                new_folder = ali.create_folder(target_name, ALI_TARGET_FOLDER_ID)
+                if new_folder:
+                    save_to_parent_id = new_folder.file_id
+                    # 使用递归转存
+                    recursive_share_transfer(ali, share_token_obj, found_target.file_id, save_to_parent_id)
+                else:
+                    return jsonify({"status": "error", "message": "创建目标文件夹失败"})
+            except Exception as create_err:
+                print(f"Create folder failed: {create_err}")
+                return jsonify({"status": "error", "message": f"创建文件夹失败: {str(create_err)}"})
 
         return jsonify({
             "status": "success",
-            "message": f"成功提交转存任务！资源 [{target_name}] 已保存到阿里云盘。"
+            "message": f"成功提交转存任务！资源 [{target_name}] 已开始转存到阿里云盘。"
         })
 
     except Exception as e:
