@@ -15,6 +15,14 @@
                    class="flex-1 border border-gray-300 rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
             <button onclick="search()" id="searchBtn" class="bg-blue-600 text-white px-6 py-2 rounded-lg hover:bg-blue-700 transition">搜索</button>
         </div>
+        
+        <script>
+            document.getElementById('keyword').addEventListener('keydown', function(event) {
+                if (event.key === 'Enter') {
+                    search();
+                }
+            });
+        </script>
 
         <div id="loading" class="hidden text-center text-gray-500 my-4">正在从海量资源中搜寻...</div>
         <ul id="results" class="divide-y divide-gray-200"></ul>

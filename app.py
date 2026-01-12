@@ -107,12 +107,11 @@ def transfer():
     if not full_path.startswith('/'): full_path = '/' + full_path
     full_path = full_path.rstrip('/')
 
-    # 1. 获取所有存储并匹配
+    # 1. 获取所有存储并匹配 (用于获取 share_id)
     storages = get_alist_storages()
     matched_storage = None
     mount_path = ""
 
-    # 寻找最长匹配的挂载路径
     for s in storages:
         m_path = s.get('mount_path')
         if not m_path: continue
@@ -124,7 +123,6 @@ def transfer():
     if not matched_storage:
         return jsonify({"status": "error", "message": "未找到对应的存储挂载，请确认路径是否正确"})
 
-    # 2. 从 addition 解析分享信息
     try:
         addition = json.loads(matched_storage.get('addition', '{}'))
     except:
@@ -132,53 +130,104 @@ def transfer():
 
     share_id = addition.get('share_id')
     share_pwd = addition.get('share_pwd', '')
-    # root_folder_id 可能是 'root' 或者具体的 ID
-    root_folder_id = 'root'
-    full_path_list = full_path.split('/')
+    
     if not share_id:
-        return jsonify({"status": "error", "message": "该路径不是阿里云盘分享挂载 (未找到 share_id)"})
+        return jsonify({"status": "error", "message": "仅支持阿里云盘分享转存 (未找到 share_id)"})
 
     try:
         ali = get_ali()
-
-        # 3. 获取 Share Token
         share_token_obj = ali.get_share_token(share_id, share_pwd=share_pwd)
-        share_token = share_token_obj.share_token
-
-        # 4. 递归查找目标文件/文件夹的 file_id
-        # 计算相对路径 parts
-        rel_path = full_path[len(mount_path):].strip('/')
-        parts = [p for p in rel_path.split('/') if p]
-
-        root_folders = ali.get_share_file_list(share_token_obj, parent_file_id="root")
-        parts = []
-        for root_folder in root_folders:
-            if root_folder.name in full_path_list:
-                parts = full_path_list[full_path_list.index(root_folder.name):]
-        current_file_id = root_folder_id
-        found = None
-        for i, part in enumerate(parts):
-            # 获取当前目录下的文件列表
-            # 注意: 这里的 parent_file_id 是在分享中的 ID
-            files = ali.get_share_file_list(share_token_obj, parent_file_id=current_file_id)
-
-            for f in files:
-                if f.name == part:
-                    current_file_id = f.file_id
-                    if part == parts[-1]:
-                        found = f
+        
+        # 2. 获取分享根目录文件列表，定位路径起点
+        root_files = ali.get_share_file_list(share_token_obj, parent_file_id='root')
+        
+        full_path_list = [p for p in full_path.split('/') if p]
+        
+        parts_to_traverse = []
+        
+        # 查找 full_path 中哪个部分对应 Share Root 下的一个文件/文件夹
+        match_index = -1
+        for i, part in enumerate(full_path_list):
+            for rf in root_files:
+                if rf.name == part:
+                    match_index = i
                     break
+            if match_index != -1:
+                break
+        
+        if match_index != -1:
+            parts_to_traverse = full_path_list[match_index:]
+        else:
+            # 如果没找到匹配，尝试使用原来的相对路径逻辑作为 fallback
+            # 或者直接报错。按照用户需求，这里应该能找到。
+            # Fallback: 假设 mount_path 对应 root
+            rel_path = full_path[len(mount_path):].strip('/')
+            parts_to_traverse = [p for p in rel_path.split('/') if p]
+            
+            # 如果还是空，说明就是根目录
+            if not parts_to_traverse and full_path == mount_path:
+                 pass # Transfer root content logic below
 
-        # 5. 执行转存
-        # current_file_id 即为目标资源的 ID
-        share_file_list = ali.get_share_file_list(share_token_obj,
-                                                  parent_file_id=current_file_id)
-        batch_save_file = ali.batch_share_file_saveto_drive([i.file_id for i in share_file_list],
-                                                            share_token_obj, ALI_TARGET_FOLDER_ID)
+        # 3. 逐层下钻 (Drill down)
+        current_file_id = 'root'
+        found_target = None
+        
+        if not parts_to_traverse:
+             # 如果没有路径需要遍历，说明目标就是 Share Root
+             # 我们构造一个虚拟对象代表 Root
+             found_target = type('obj', (object,), {'name': full_path_list[-1] if full_path_list else "Root_Transfer", 'file_id': 'root', 'type': 'folder'})
+        else:
+            for i, part in enumerate(parts_to_traverse):
+                # 列出当前层级的文件
+                files = ali.get_share_file_list(share_token_obj, parent_file_id=current_file_id)
+                found_in_level = None
+                for f in files:
+                    if f.name == part:
+                        found_in_level = f
+                        break
+                
+                if not found_in_level:
+                    return jsonify({"status": "error", "message": f"在分享路径中未找到: {part} (上一级 ID: {current_file_id})"})
+                
+                current_file_id = found_in_level.file_id
+                if i == len(parts_to_traverse) - 1:
+                    found_target = found_in_level
+
+        # 4. 执行转存
+        if not found_target:
+             return jsonify({"status": "error", "message": "无法定位目标文件"})
+
+        target_name = found_target.name
+        transfer_file_ids = []
+        save_to_parent_id = ALI_TARGET_FOLDER_ID
+        
+        # 如果是文件：创建同名文件夹（去后缀），转存该文件
+        if getattr(found_target, 'type', 'folder') == 'file':
+            target_name = os.path.splitext(target_name)[0]
+            transfer_file_ids = [found_target.file_id]
+        else:
+            # 如果是文件夹：创建同名文件夹，转存该文件夹下的所有子内容
+            # 获取子内容
+            children = ali.get_share_file_list(share_token_obj, parent_file_id=found_target.file_id)
+            transfer_file_ids = [c.file_id for c in children]
+            
+            if not transfer_file_ids:
+                 return jsonify({"status": "success", "message": "目标文件夹为空，无需转存。"})
+
+        # 创建目标目录
+        try:
+            new_folder = ali.create_folder(target_name, ALI_TARGET_FOLDER_ID)
+            if new_folder:
+                save_to_parent_id = new_folder.file_id
+        except Exception as create_err:
+            print(f"Create folder failed: {create_err}")
+
+        # 批量转存
+        ali.batch_share_file_saveto_drive(transfer_file_ids, share_token_obj, save_to_parent_id)
 
         return jsonify({
             "status": "success",
-            "message": f"成功提交转存任务！资源 [{parts[-1] if parts else mount_path}] 已保存。"
+            "message": f"成功提交转存任务！资源 [{target_name}] 已保存到阿里云盘。"
         })
 
     except Exception as e:
