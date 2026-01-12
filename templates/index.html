@@ -3,66 +3,208 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>小雅资源一键转存</title>
+    <title>小雅资源助手</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        .glass-effect {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+        }
+        .scrollbar-hide::-webkit-scrollbar {
+            display: none;
+        }
+    </style>
 </head>
-<body class="bg-gray-100 min-h-screen p-8">
-    <div class="max-w-3xl mx-auto bg-white rounded-xl shadow-md p-6">
-        <h1 class="text-2xl font-bold text-gray-800 mb-6 text-center">🎬 小雅资源助手</h1>
+<body class="bg-gradient-to-br from-indigo-50 via-purple-50 to-pink-50 min-h-screen text-gray-700">
 
-        <div class="flex gap-2 mb-8">
-            <input type="text" id="keyword" placeholder="输入影视名称..."
-                   class="flex-1 border border-gray-300 rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
-            <button onclick="search()" id="searchBtn" class="bg-blue-600 text-white px-6 py-2 rounded-lg hover:bg-blue-700 transition">搜索</button>
+    <!-- Navbar -->
+    <nav class="sticky top-0 z-40 glass-effect border-b border-gray-200 shadow-sm transition-all duration-300">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex justify-between h-16 items-center">
+                <div class="flex items-center gap-3">
+                    <div class="bg-gradient-to-r from-blue-600 to-purple-600 text-white p-2 rounded-lg shadow-md">
+                        <i class="fas fa-film text-lg"></i>
+                    </div>
+                    <span class="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-700 to-purple-700">
+                        小雅资源助手
+                    </span>
+                </div>
+                <button onclick="openModal()" class="group flex items-center gap-2 bg-white border border-gray-200 text-gray-600 px-4 py-2 rounded-full hover:border-blue-400 hover:text-blue-600 hover:shadow-md transition-all duration-300">
+                    <div class="bg-blue-100 text-blue-600 rounded-full p-1.5 group-hover:bg-blue-600 group-hover:text-white transition-colors">
+                        <i class="fas fa-cloud"></i>
+                    </div>
+                    <span class="text-sm font-medium">阿里云盘管理</span>
+                </button>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
+        <!-- Search Section -->
+        <div class="text-center mb-12">
+            <h1 class="text-4xl font-extrabold text-gray-900 mb-4 tracking-tight">
+                探索海量影视资源
+            </h1>
+            <p class="text-lg text-gray-500 mb-8">一键搜索，极速转存，畅享高清体验</p>
+            
+            <div class="relative max-w-2xl mx-auto group">
+                <div class="absolute -inset-1 bg-gradient-to-r from-blue-400 to-purple-400 rounded-2xl blur opacity-25 group-hover:opacity-50 transition duration-1000 group-hover:duration-200"></div>
+                <div class="relative flex bg-white rounded-xl shadow-xl overflow-hidden ring-1 ring-gray-900/5">
+                    <div class="pl-6 flex items-center pointer-events-none text-gray-400">
+                        <i class="fas fa-search text-lg"></i>
+                    </div>
+                    <input type="text" id="keyword" 
+                           class="flex-1 border-0 py-4 pl-4 pr-4 text-gray-900 placeholder-gray-400 focus:ring-0 text-lg"
+                           placeholder="输入电影、剧集名称...">
+                    <button onclick="search()" id="searchBtn" 
+                            class="bg-blue-600 text-white px-8 font-semibold hover:bg-blue-700 transition-colors duration-200 flex items-center gap-2">
+                        <span>搜索</span>
+                        <i class="fas fa-arrow-right text-sm"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Results Section -->
+        <div id="loading" class="hidden py-12 text-center">
+            <div class="inline-flex items-center gap-3 px-4 py-2 rounded-full bg-blue-50 text-blue-700">
+                <i class="fas fa-circle-notch fa-spin"></i>
+                <span class="font-medium">正在全网搜寻资源...</span>
+            </div>
+        </div>
+
+        <div id="results-container" class="hidden">
+            <div class="flex items-center justify-between mb-4 px-2">
+                <h3 class="text-lg font-bold text-gray-800">搜索结果</h3>
+                <span class="text-sm text-gray-500 bg-gray-100 px-3 py-1 rounded-full" id="resultCount">0 个资源</span>
+            </div>
+            <ul id="results" class="bg-white rounded-2xl shadow-sm border border-gray-100 divide-y divide-gray-100 overflow-hidden">
+                <!-- Results will be injected here -->
+            </ul>
         </div>
         
-        <script>
-            document.getElementById('keyword').addEventListener('keydown', function(event) {
-                if (event.key === 'Enter') {
-                    search();
-                }
-            });
-        </script>
-
-        <div id="loading" class="hidden text-center text-gray-500 my-4">正在从海量资源中搜寻...</div>
-        <ul id="results" class="divide-y divide-gray-200"></ul>
-
-        <!-- 阿里云盘管理 -->
-        <div class="mt-12 border-t pt-8">
-            <h2 class="text-xl font-bold text-gray-800 mb-4 flex items-center justify-between">
-                <span>📂 阿里云盘管理</span>
-                <span class="text-sm text-gray-500 font-normal" id="currentPath">/</span>
-            </h2>
-            
-            <div class="flex gap-2 mb-4">
-                <button onclick="loadAliFiles('root')" class="bg-gray-200 text-gray-700 px-3 py-1 rounded hover:bg-gray-300 text-sm">🏠 根目录</button>
-                <button onclick="goUp()" id="btnUp" class="bg-gray-200 text-gray-700 px-3 py-1 rounded hover:bg-gray-300 text-sm hidden">⬆️ 上一级</button>
-                <div class="flex-1"></div>
-                <button onclick="downloadSelected()" class="bg-blue-600 text-white px-4 py-1 rounded hover:bg-blue-700 text-sm">📥 下载选中到服务器</button>
+        <!-- Empty State -->
+        <div id="empty-state" class="text-center py-16 opacity-60">
+            <div class="bg-gray-100 w-24 h-24 rounded-full flex items-center justify-center mx-auto mb-4 text-gray-400 text-3xl">
+                <i class="fas fa-film"></i>
             </div>
+            <p class="text-gray-500">输入关键词开始搜索</p>
+        </div>
+    </main>
 
-            <div class="border rounded-lg overflow-hidden">
-                <table class="min-w-full divide-y divide-gray-200">
-                    <thead class="bg-gray-50">
-                        <tr>
-                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-10">
-                                <input type="checkbox" onchange="toggleAll(this)" class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
-                            </th>
-                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">名称</th>
-                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-24">大小</th>
-                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-40">时间</th>
-                        </tr>
-                    </thead>
-                    <tbody id="aliFiles" class="bg-white divide-y divide-gray-200">
-                        <tr><td colspan="4" class="px-4 py-4 text-center text-gray-500">请点击根目录加载文件...</td></tr>
-                    </tbody>
-                </table>
+    <!-- Aliyun Drive Modal -->
+    <div id="aliModal" class="fixed inset-0 z-50 hidden" aria-labelledby="modal-title" role="dialog" aria-modal="true">
+        <!-- Backdrop -->
+        <div class="fixed inset-0 bg-gray-900/60 backdrop-blur-sm transition-opacity opacity-0" id="modalBackdrop"></div>
+
+        <div class="fixed inset-0 z-10 overflow-y-auto">
+            <div class="flex min-h-full items-end justify-center p-4 text-center sm:items-center sm:p-0">
+                <!-- Modal Panel -->
+                <div class="relative transform overflow-hidden rounded-2xl bg-white text-left shadow-2xl transition-all sm:my-8 sm:w-full sm:max-w-4xl opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95" id="modalPanel">
+                    
+                    <!-- Header -->
+                    <div class="bg-gradient-to-r from-gray-50 to-white px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+                        <div class="flex items-center gap-3">
+                            <div class="bg-blue-100 p-2 rounded-lg text-blue-600">
+                                <i class="fas fa-cloud"></i>
+                            </div>
+                            <div>
+                                <h3 class="text-lg font-bold text-gray-900" id="modal-title">阿里云盘文件管理</h3>
+                                <p class="text-xs text-gray-500 truncate max-w-md" id="currentPath">加载中...</p>
+                            </div>
+                        </div>
+                        <button onclick="closeModal()" class="text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-full p-2 transition-colors">
+                            <i class="fas fa-times text-xl"></i>
+                        </button>
+                    </div>
+
+                    <!-- Toolbar -->
+                    <div class="px-6 py-3 bg-white border-b border-gray-100 flex items-center gap-3">
+                        <button onclick="loadAliFiles('root')" class="inline-flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-colors">
+                            <i class="fas fa-home text-gray-500"></i> 根目录
+                        </button>
+                        <button onclick="goUp()" id="btnUp" class="hidden inline-flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors">
+                            <i class="fas fa-level-up-alt text-gray-500"></i> 上一级
+                        </button>
+                        <div class="flex-1"></div>
+                        <button onclick="downloadSelected()" class="inline-flex items-center gap-2 px-4 py-1.5 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 shadow-sm transition-colors">
+                            <i class="fas fa-download"></i> 下载选中到服务器
+                        </button>
+                    </div>
+
+                    <!-- File List -->
+                    <div class="px-6 py-2 bg-gray-50 min-h-[400px] max-h-[60vh] overflow-y-auto">
+                        <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+                            <table class="min-w-full divide-y divide-gray-100">
+                                <thead class="bg-gray-50">
+                                    <tr>
+                                        <th class="px-4 py-3 text-left w-12">
+                                            <input type="checkbox" onchange="toggleAll(this)" class="rounded border-gray-300 text-blue-600 focus:ring-blue-500 w-4 h-4 cursor-pointer">
+                                        </th>
+                                        <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">文件名</th>
+                                        <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider w-28">大小</th>
+                                        <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider w-36">修改时间</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="aliFiles" class="divide-y divide-gray-50 text-sm">
+                                    <!-- Files injected via JS -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                    
+                    <!-- Footer -->
+                    <div class="bg-gray-50 px-6 py-3 text-right">
+                        <span class="text-xs text-gray-400">支持多选批量下载 • 点击文件名直接浏览器下载</span>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
 
     <script>
-        // --- 搜索功能 ---
+        // Modal Logic
+        const modal = document.getElementById('aliModal');
+        const modalBackdrop = document.getElementById('modalBackdrop');
+        const modalPanel = document.getElementById('modalPanel');
+
+        function openModal() {
+            modal.classList.remove('hidden');
+            // Allow display:block to apply before adding opacity classes for transition
+            setTimeout(() => {
+                modalBackdrop.classList.remove('opacity-0');
+                modalPanel.classList.remove('opacity-0', 'translate-y-4', 'sm:translate-y-0', 'sm:scale-95');
+            }, 10);
+            
+            if (document.getElementById('aliFiles').children.length <= 1) {
+                loadAliFiles('root');
+            }
+        }
+
+        function closeModal() {
+            modalBackdrop.classList.add('opacity-0');
+            modalPanel.classList.add('opacity-0', 'translate-y-4', 'sm:translate-y-0', 'sm:scale-95');
+            setTimeout(() => {
+                modal.classList.add('hidden');
+            }, 300);
+        }
+
+        // Close modal when clicking outside
+        modal.addEventListener('click', (e) => {
+            if (e.target === modalBackdrop || e.target.closest('.fixed.inset-0') === e.target) {
+                // closeModal(); // Optional: enable click outside to close
+            }
+        });
+
+        document.getElementById('keyword').addEventListener('keydown', function(event) {
+            if (event.key === 'Enter') {
+                search();
+            }
+        });
+
+        // Search Functionality
         async function search() {
             const keyword = document.getElementById('keyword').value;
             if (!keyword) return alert('请输入关键词');
@@ -70,77 +212,112 @@
             const btn = document.getElementById('searchBtn');
             const list = document.getElementById('results');
             const loading = document.getElementById('loading');
+            const container = document.getElementById('results-container');
+            const emptyState = document.getElementById('empty-state');
+            const resultCount = document.getElementById('resultCount');
 
             list.innerHTML = '';
             loading.classList.remove('hidden');
+            container.classList.add('hidden');
+            emptyState.classList.add('hidden');
             btn.disabled = true;
+            btn.classList.add('opacity-75', 'cursor-not-allowed');
 
-            const res = await fetch('/api/search', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({keyword})
-            });
-            const data = await res.json();
-
-            loading.classList.add('hidden');
-            btn.disabled = false;
-
-            if (data.status === 'success') {
-                window.currentResults = data.results;
-                data.results.forEach((item, index) => {
-                    const li = document.createElement('li');
-                    li.className = 'py-4 flex justify-between items-center';
-                    li.innerHTML = `
-                        <div class="flex-1 pr-4">
-                            <p class="text-gray-800 font-medium break-all">${item.name}</p>
-                            <a href="${item.url}" target="_blank" class="text-xs text-blue-500 hover:underline break-all mt-1 block" title="点击跳转到小雅">${item.path}</a>
-                        </div>
-                        <button onclick="transferByIndex(${index})" class="bg-green-500 text-white text-sm px-4 py-1 rounded hover:bg-green-600 transition shrink-0">一键转存</button>
-                    `;
-                    list.appendChild(li);
+            try {
+                const res = await fetch('/api/search', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({keyword})
                 });
-            } else {
-                alert('搜索失败: ' + data.message);
+                const data = await res.json();
+
+                if (data.status === 'success') {
+                    window.currentResults = data.results;
+                    resultCount.textContent = `${data.results.length} 个资源`;
+                    
+                    if (data.results.length > 0) {
+                        data.results.forEach((item, index) => {
+                            const li = document.createElement('li');
+                            li.className = 'p-4 hover:bg-gray-50 transition-colors duration-150 group';
+                            li.innerHTML = `
+                                <div class="flex items-center justify-between gap-4">
+                                    <div class="flex-1 min-w-0">
+                                        <div class="flex items-center gap-2 mb-1">
+                                            <i class="fas fa-file-video text-blue-500 opacity-75 group-hover:opacity-100"></i>
+                                            <p class="text-sm font-medium text-gray-900 truncate" title="${item.name}">${item.name}</p>
+                                        </div>
+                                        <a href="${item.url}" target="_blank" class="text-xs text-gray-400 hover:text-blue-500 hover:underline truncate block flex items-center gap-1" title="跳转到小雅">
+                                            <i class="fas fa-external-link-alt text-[10px]"></i>
+                                            ${item.path}
+                                        </a>
+                                    </div>
+                                    <button onclick="transferByIndex(${index})" class="flex-shrink-0 inline-flex items-center gap-1 bg-white border border-gray-200 text-gray-600 text-xs px-3 py-1.5 rounded-lg hover:border-green-500 hover:text-green-600 hover:shadow-sm transition-all duration-200">
+                                        <i class="fas fa-save"></i>
+                                        <span>一键转存</span>
+                                    </button>
+                                </div>
+                            `;
+                            list.appendChild(li);
+                        });
+                        container.classList.remove('hidden');
+                    } else {
+                        emptyState.innerHTML = '<p class="text-gray-500">未找到相关资源，换个词试试？</p>';
+                        emptyState.classList.remove('hidden');
+                    }
+                } else {
+                    alert('搜索失败: ' + data.message);
+                }
+            } catch (error) {
+                alert('请求出错，请检查网络');
+            } finally {
+                loading.classList.add('hidden');
+                btn.disabled = false;
+                btn.classList.remove('opacity-75', 'cursor-not-allowed');
             }
         }
 
         async function transferByIndex(index) {
             const item = window.currentResults[index];
             if (!item) return;
+            
             const buttons = document.querySelectorAll('button');
-            const targetBtn = Array.from(buttons).find(b => b.textContent === '一键转存' && b.getAttribute('onclick') === `transferByIndex(${index})`);
+            // Find the specific button clicked based on logic (simplified here for brevity)
+            // A more robust way would be to pass `this` to the function
+            const allTransferBtns = Array.from(document.querySelectorAll('button')).filter(b => b.textContent.includes('一键转存'));
+            const targetBtn = allTransferBtns[index]; // Assuming order matches
+
             if (targetBtn) {
+                const originalHtml = targetBtn.innerHTML;
                 targetBtn.disabled = true;
-                targetBtn.classList.replace('bg-green-500', 'bg-gray-400');
-                targetBtn.textContent = '转存中...';
-            }
-            try {
-                const res = await fetch('/api/transfer', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({path: item.path})
-                });
-                const data = await res.json();
-                alert(data.message);
-            } catch (e) {
-                alert('请求失败');
-            } finally {
-                if (targetBtn) {
+                targetBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 转存中...';
+                targetBtn.classList.add('bg-gray-100', 'text-gray-400');
+                
+                try {
+                    const res = await fetch('/api/transfer', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({path: item.path})
+                    });
+                    const data = await res.json();
+                    alert(data.message);
+                } catch (e) {
+                    alert('请求失败');
+                } finally {
                     targetBtn.disabled = false;
-                    targetBtn.classList.replace('bg-gray-400', 'bg-green-500');
-                    targetBtn.textContent = '一键转存';
+                    targetBtn.innerHTML = originalHtml;
+                    targetBtn.classList.remove('bg-gray-100', 'text-gray-400');
                 }
             }
         }
 
-        // --- 阿里云盘管理功能 ---
+        // Aliyun Drive Logic
         let currentDriveId = null;
         let currentParentId = 'root';
-        let parentHistory = []; // 简单的历史记录栈
+        let parentHistory = [];
         
         async function loadAliFiles(parentId, isUp = false) {
             const tbody = document.getElementById('aliFiles');
-            tbody.innerHTML = '<tr><td colspan="4" class="px-4 py-4 text-center text-gray-500">加载中...</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="4" class="px-6 py-12 text-center text-gray-400"><i class="fas fa-circle-notch fa-spin text-2xl mb-2"></i><br>加载文件中...</td></tr>';
             
             try {
                 const res = await fetch('/api/aliyun/files', {
@@ -156,74 +333,71 @@
                 if (data.status === 'success') {
                     currentDriveId = data.drive_id;
                     
-                    // 处理历史记录
                     if (!isUp && parentId !== currentParentId) {
                          if (parentId === 'root') {
                              parentHistory = [];
                          } else {
                              parentHistory.push(currentParentId);
                          }
-                    } else if (isUp) {
-                        // 已经在 goUp 中处理了 pop
                     }
                     currentParentId = parentId;
 
-                    // 更新 UI
                     renderFiles(data.files);
                     updateBreadcrumb(data.current_folder);
                     document.getElementById('btnUp').classList.toggle('hidden', currentParentId === 'root');
                 } else {
-                    tbody.innerHTML = `<tr><td colspan="4" class="px-4 py-4 text-center text-red-500">${data.message}</td></tr>`;
+                    tbody.innerHTML = `<tr><td colspan="4" class="px-6 py-8 text-center text-red-500 bg-red-50 rounded-lg mx-4 mt-4">${data.message}</td></tr>`;
                 }
             } catch (e) {
-                tbody.innerHTML = `<tr><td colspan="4" class="px-4 py-4 text-center text-red-500">加载失败: ${e}</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="4" class="px-6 py-8 text-center text-red-500">加载失败: ${e}</td></tr>`;
             }
         }
 
         function renderFiles(files) {
             const tbody = document.getElementById('aliFiles');
             if (files.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="4" class="px-4 py-4 text-center text-gray-500">空文件夹</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="4" class="px-6 py-12 text-center text-gray-400 flex flex-col items-center"><i class="fas fa-folder-open text-4xl mb-2 opacity-50"></i><span>空文件夹</span></td></tr>';
                 return;
             }
             
             tbody.innerHTML = files.map(f => {
-                const icon = f.type === 'folder' ? '📁' : '📄';
-                const size = f.type === 'folder' ? '-' : formatSize(f.size);
-                
-                let nameClick = '';
-                let nameClass = '';
-                
-                if (f.type === 'folder') {
-                    nameClick = `onclick="loadAliFiles('${f.file_id}')"`;
-                    nameClass = 'text-blue-600 hover:underline cursor-pointer';
-                } else {
-                    // 文件类型，点击下载
-                    nameClick = `onclick="browserDownload('${f.file_id}', '${f.name}')"`;
-                    nameClass = 'text-green-600 hover:underline cursor-pointer';
-                }
+                const isFolder = f.type === 'folder';
+                const iconClass = isFolder ? 'fa-folder text-yellow-400' : 'fa-file text-blue-400';
+                const size = isFolder ? '-' : formatSize(f.size);
+                const clickAction = isFolder ? `loadAliFiles('${f.file_id}')` : `browserDownload('${f.file_id}', '${f.name}')`;
+                const hoverClass = isFolder ? 'hover:text-blue-600' : 'hover:text-green-600';
+                const titleText = isFolder ? '进入文件夹' : '点击下载文件';
                 
                 return `
-                    <tr class="hover:bg-gray-50">
+                    <tr class="hover:bg-blue-50/50 transition-colors group">
                         <td class="px-4 py-3 whitespace-nowrap">
-                            <input type="checkbox" name="aliFile" value="${f.file_id}" class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                            <input type="checkbox" name="aliFile" value="${f.file_id}" class="rounded border-gray-300 text-blue-600 focus:ring-blue-500 cursor-pointer">
                         </td>
                         <td class="px-4 py-3 whitespace-nowrap">
-                            <span ${nameClick} class="${nameClass} flex items-center gap-2" title="${f.type === 'folder' ? '进入文件夹' : '点击下载'}">
-                                <span>${icon}</span>
-                                <span class="truncate max-w-xs" title="${f.name}">${f.name}</span>
-                            </span>
+                            <div class="flex items-center cursor-pointer ${hoverClass}" onclick="${clickAction}" title="${titleText}">
+                                <div class="flex-shrink-0 w-8 text-center">
+                                    <i class="fas ${iconClass} text-lg"></i>
+                                </div>
+                                <span class="text-gray-700 font-medium truncate max-w-xs group-hover:underline">${f.name}</span>
+                            </div>
                         </td>
-                        <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-500">${size}</td>
-                        <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-500">${f.updated_at.split(' ')[0]}</td>
+                        <td class="px-4 py-3 whitespace-nowrap text-xs text-gray-500 font-mono">${size}</td>
+                        <td class="px-4 py-3 whitespace-nowrap text-xs text-gray-400">${f.updated_at.split(' ')[0]}</td>
                     </tr>
                 `;
             }).join('');
         }
 
+        function updateBreadcrumb(currentFolder) {
+            const el = document.getElementById('currentPath');
+            if (!currentFolder || currentFolder.name === 'root') {
+                el.innerHTML = '<span class="px-2 py-1 bg-gray-100 rounded text-gray-600">根目录</span>';
+            } else {
+                el.innerHTML = `<span class="text-gray-400">... / </span> <span class="font-medium text-gray-800">${currentFolder.name}</span>`;
+            }
+        }
+
         function browserDownload(fileId, fileName) {
-            // 使用 iframe 或 window.open 触发下载，避免页内跳转
-            // 构建代理 URL
             const url = `/api/aliyun/proxy?file_id=${fileId}&file_name=${encodeURIComponent(fileName)}&drive_id=${currentDriveId || ''}`;
             window.open(url, '_blank');
         }
@@ -237,20 +411,8 @@
             }
         }
 
-        function updateBreadcrumb(currentFolder) {
-            const el = document.getElementById('currentPath');
-            if (!currentFolder || currentFolder.name === 'root') {
-                el.textContent = '/';
-            } else {
-                el.textContent = `... / ${currentFolder.name}`;
-            }
-        }
-
         function toggleAll(source) {
-            const checkboxes = document.getElementsByName('aliFile');
-            for(let i=0, n=checkboxes.length;i<n;i++) {
-                checkboxes[i].checked = source.checked;
-            }
+            document.getElementsByName('aliFile').forEach(cb => cb.checked = source.checked);
         }
         
         function formatSize(bytes) {
@@ -266,7 +428,6 @@
             const ids = Array.from(checkboxes).map(cb => cb.value);
             
             if (ids.length === 0) return alert('请先选择要下载的文件或文件夹');
-            
             if (!confirm(`确定要下载选中的 ${ids.length} 个项目到服务器吗？`)) return;
             
             try {
@@ -280,15 +441,11 @@
                 });
                 const data = await res.json();
                 alert(data.message);
-                // 取消勾选
                 checkboxes.forEach(cb => cb.checked = false);
             } catch (e) {
                 alert('下载请求失败');
             }
         }
-        
-        // 初始加载
-        // loadAliFiles('root'); 
     </script>
 </body>
 </html>
