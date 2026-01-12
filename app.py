@@ -39,7 +39,8 @@ def get_ali():
     if _ali_instance is None:
         if not ALI_REFRESH_TOKEN:
             print("警告: 未设置 ALI_REFRESH_TOKEN，Aligo 将进入扫码模式")
-        _ali_instance = Aligo(refresh_token=ALI_REFRESH_TOKEN)
+        # Enable aria2 for faster downloads
+        _ali_instance = Aligo(refresh_token=ALI_REFRESH_TOKEN, use_aria2=True)
     return _ali_instance
 
 
