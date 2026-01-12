@@ -205,6 +205,95 @@ def aliyun_proxy():
         return f"Proxy error: {str(e)}", 500
 
 
+@app.route('/api/aliyun/delete', methods=['POST'])
+def aliyun_delete():
+    """批量移动文件到回收站"""
+    file_ids = request.json.get('file_ids', [])
+    drive_id = request.json.get('drive_id')
+
+    if not file_ids:
+        return jsonify({"status": "error", "message": "未选择文件"})
+
+    try:
+        ali = get_ali()
+        ali.batch_move_to_trash(file_ids, drive_id=drive_id)
+        return jsonify({"status": "success", "message": "已移入回收站"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)})
+
+
+@app.route('/api/aliyun/mkdir', methods=['POST'])
+def aliyun_mkdir():
+    """创建文件夹"""
+    name = request.json.get('name')
+    parent_file_id = request.json.get('parent_file_id', 'root')
+    drive_id = request.json.get('drive_id')
+
+    if not name:
+        return jsonify({"status": "error", "message": "名称不能为空"})
+
+    try:
+        ali = get_ali()
+        ali.create_folder(name, parent_file_id=parent_file_id, drive_id=drive_id)
+        return jsonify({"status": "success", "message": "创建成功"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)})
+
+
+def background_upload(ali, local_path, parent_file_id, drive_id):
+    """后台上传任务"""
+    try:
+        print(f"Starting background upload: {local_path}")
+        # upload_file 会自动处理分片和秒传
+        ali.upload_file(local_path, parent_file_id=parent_file_id, drive_id=drive_id)
+        print(f"Upload finished: {local_path}")
+    except Exception as e:
+        print(f"Upload failed: {e}")
+    finally:
+        # 上传完成后（无论成功失败）删除临时文件
+        if os.path.exists(local_path):
+            try:
+                os.remove(local_path)
+            except:
+                pass
+
+
+@app.route('/api/aliyun/upload', methods=['POST'])
+def aliyun_upload():
+    """上传文件 (先存临时目录，再后台上传)"""
+    if 'file' not in request.files:
+        return jsonify({"status": "error", "message": "未上传文件"})
+    
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"status": "error", "message": "文件名为空"})
+        
+    parent_file_id = request.form.get('parent_file_id', 'root')
+    drive_id = request.form.get('drive_id')
+    
+    # 确保临时目录存在
+    temp_dir = os.path.join(os.getcwd(), 'temp_uploads')
+    if not os.path.exists(temp_dir):
+        os.makedirs(temp_dir)
+    
+    local_path = os.path.join(temp_dir, file.filename)
+    
+    try:
+        file.save(local_path)
+        
+        ali = get_ali()
+        # 启动后台线程上传
+        thread = threading.Thread(target=background_upload, args=(ali, local_path, parent_file_id, drive_id))
+        thread.start()
+        
+        return jsonify({"status": "success", "message": "文件已接收，正在后台上传到阿里云盘..."})
+    except Exception as e:
+        # 如果保存失败，尝试清理
+        if os.path.exists(local_path):
+            os.remove(local_path)
+        return jsonify({"status": "error", "message": str(e)})
+
+
 def get_alist_storages():
     """获取 Alist 所有存储挂载信息"""
     try:

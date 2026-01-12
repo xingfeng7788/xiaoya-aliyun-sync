@@ -50,19 +50,32 @@
             <p class="text-lg text-gray-500 mb-8">一键搜索，极速转存，畅享高清体验</p>
             
             <div class="relative max-w-2xl mx-auto group">
-                <div class="absolute -inset-1 bg-gradient-to-r from-blue-400 to-purple-400 rounded-2xl blur opacity-25 group-hover:opacity-50 transition duration-1000 group-hover:duration-200"></div>
+                <!-- Removed the glow effect div -->
                 <div class="relative flex bg-white rounded-xl shadow-xl overflow-hidden ring-1 ring-gray-900/5">
-                    <div class="pl-6 flex items-center pointer-events-none text-gray-400">
+                    <div class="pl-6 flex items-center pointer-events-none text-gray-400 group-focus-within:text-blue-500 transition-colors duration-300">
                         <i class="fas fa-search text-lg"></i>
                     </div>
                     <input type="text" id="keyword" 
-                           class="flex-1 border-0 py-4 pl-4 pr-4 text-gray-900 placeholder-gray-400 focus:ring-0 text-lg"
+                           class="flex-1 border-0 py-4 pl-4 pr-4 text-gray-900 placeholder-gray-400 focus:ring-0 outline-none text-lg transition-colors"
                            placeholder="输入电影、剧集名称...">
                     <button onclick="search()" id="searchBtn" 
                             class="bg-blue-600 text-white px-8 font-semibold hover:bg-blue-700 transition-colors duration-200 flex items-center gap-2">
                         <span>搜索</span>
                         <i class="fas fa-arrow-right text-sm"></i>
                     </button>
+                </div>
+
+                <!-- Search History -->
+                <div id="search-history" class="mt-6 hidden transition-all duration-300">
+                    <div class="flex flex-col items-center gap-2">
+                        <div class="text-sm text-gray-400 mb-1">最近搜索</div>
+                        <div class="flex flex-wrap justify-center gap-2" id="history-tags">
+                            <!-- Tags will be injected here -->
+                        </div>
+                        <button onclick="clearHistory()" class="text-xs text-gray-300 hover:text-red-400 mt-2 transition-colors flex items-center gap-1" title="清空历史">
+                            <i class="fas fa-trash-alt"></i>
+                        </button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -121,16 +134,33 @@
                     </div>
 
                     <!-- Toolbar -->
-                    <div class="px-6 py-3 bg-white border-b border-gray-100 flex items-center gap-3">
+                    <div class="px-6 py-3 bg-white border-b border-gray-100 flex flex-wrap items-center gap-2">
                         <button onclick="loadAliFiles('root')" class="inline-flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-colors">
-                            <i class="fas fa-home text-gray-500"></i> 根目录
+                            <i class="fas fa-home text-gray-500"></i>
                         </button>
                         <button onclick="goUp()" id="btnUp" class="hidden inline-flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors">
-                            <i class="fas fa-level-up-alt text-gray-500"></i> 上一级
+                            <i class="fas fa-level-up-alt text-gray-500"></i>
                         </button>
+                        
+                        <div class="h-6 w-px bg-gray-300 mx-1"></div>
+
+                        <button onclick="createFolder()" class="inline-flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors">
+                            <i class="fas fa-folder-plus text-yellow-500"></i> 新建文件夹
+                        </button>
+                        
+                        <button onclick="triggerUpload()" class="inline-flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors">
+                            <i class="fas fa-cloud-upload-alt text-blue-500"></i> 上传文件
+                        </button>
+                        <input type="file" id="uploadInput" style="display:none" onchange="handleFileUpload(this)">
+
+                        <button onclick="deleteSelected()" class="inline-flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-red-600 bg-white border border-red-200 rounded-lg hover:bg-red-50 transition-colors">
+                            <i class="fas fa-trash-alt"></i> 删除选中
+                        </button>
+
                         <div class="flex-1"></div>
+                        
                         <button onclick="downloadSelected()" class="inline-flex items-center gap-2 px-4 py-1.5 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 shadow-sm transition-colors">
-                            <i class="fas fa-download"></i> 下载选中到服务器
+                            <i class="fas fa-download"></i> 下载到服务器
                         </button>
                     </div>
 
@@ -208,6 +238,9 @@
         async function search() {
             const keyword = document.getElementById('keyword').value;
             if (!keyword) return alert('请输入关键词');
+
+            // Save to history
+            saveSearchHistory(keyword);
 
             const btn = document.getElementById('searchBtn');
             const list = document.getElementById('results');
@@ -446,6 +479,158 @@
                 alert('下载请求失败');
             }
         }
+
+        async function createFolder() {
+            const name = prompt("请输入文件夹名称:");
+            if (!name) return;
+            
+            try {
+                const res = await fetch('/api/aliyun/mkdir', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        name: name,
+                        parent_file_id: currentParentId,
+                        drive_id: currentDriveId
+                    })
+                });
+                const data = await res.json();
+                if (data.status === 'success') {
+                    // alert('创建成功');
+                    loadAliFiles(currentParentId); // 刷新列表
+                } else {
+                    alert('创建失败: ' + data.message);
+                }
+            } catch (e) {
+                alert('请求失败');
+            }
+        }
+
+        function triggerUpload() {
+            document.getElementById('uploadInput').click();
+        }
+
+        async function handleFileUpload(input) {
+            const file = input.files[0];
+            if (!file) return;
+            
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('parent_file_id', currentParentId);
+            if (currentDriveId) formData.append('drive_id', currentDriveId);
+            
+            // 简单的上传提示，实际项目可以做进度条
+            const originalText = document.querySelector('button[onclick="triggerUpload()"]').innerHTML;
+            const btn = document.querySelector('button[onclick="triggerUpload()"]');
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 上传中...';
+            btn.disabled = true;
+
+            try {
+                const res = await fetch('/api/aliyun/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await res.json();
+                alert(data.message);
+                if (data.status === 'success') {
+                    loadAliFiles(currentParentId); // 刷新列表 (后台上传可能还没完成，但可以先刷新一下看看)
+                }
+            } catch (e) {
+                alert('上传请求失败');
+            } finally {
+                btn.innerHTML = originalText;
+                btn.disabled = false;
+                input.value = ''; // 清空，允许再次上传同名文件
+            }
+        }
+
+        async function deleteSelected() {
+            const checkboxes = document.querySelectorAll('input[name="aliFile"]:checked');
+            const ids = Array.from(checkboxes).map(cb => cb.value);
+            
+            if (ids.length === 0) return alert('请先选择要删除的文件或文件夹');
+            if (!confirm(`确定要删除选中的 ${ids.length} 个项目吗？(将移入回收站)`)) return;
+            
+            try {
+                const res = await fetch('/api/aliyun/delete', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        file_ids: ids,
+                        drive_id: currentDriveId
+                    })
+                });
+                const data = await res.json();
+                if (data.status === 'success') {
+                    alert(data.message);
+                    loadAliFiles(currentParentId); // 刷新列表
+                } else {
+                    alert('删除失败: ' + data.message);
+                }
+            } catch (e) {
+                alert('请求失败');
+            }
+        }
+
+        // Search History Management
+        const HISTORY_KEY = 'xiaoya_search_history';
+        const MAX_HISTORY = 10;
+
+        function loadSearchHistory() {
+            try {
+                const history = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
+                renderSearchHistory(history);
+            } catch (e) {
+                console.error('Error loading history:', e);
+            }
+        }
+
+        function saveSearchHistory(keyword) {
+            try {
+                let history = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
+                // Remove existing to move to top
+                history = history.filter(k => k !== keyword);
+                history.unshift(keyword);
+                if (history.length > MAX_HISTORY) history.pop();
+                localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+                renderSearchHistory(history);
+            } catch (e) {
+                console.error('Error saving history:', e);
+            }
+        }
+
+        function renderSearchHistory(history) {
+            const container = document.getElementById('search-history');
+            const tagsContainer = document.getElementById('history-tags');
+            
+            if (!history || history.length === 0) {
+                container.classList.add('hidden');
+                return;
+            }
+            
+            container.classList.remove('hidden');
+            tagsContainer.innerHTML = history.map(k => `
+                <button onclick="useHistoryKeyword('${k.replace(/'/g, "\\'")}')" 
+                        class="px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-sm text-gray-600 hover:bg-white hover:border-blue-400 hover:text-blue-600 hover:shadow-sm transition-all duration-200">
+                    ${k}
+                </button>
+            `).join('');
+        }
+
+        function useHistoryKeyword(keyword) {
+            document.getElementById('keyword').value = keyword;
+            search();
+        }
+
+        function clearHistory() {
+            if(confirm('确定清空搜索历史吗？')) {
+                localStorage.removeItem(HISTORY_KEY);
+                renderSearchHistory([]);
+            }
+        }
+
+        // Init history
+        document.addEventListener('DOMContentLoaded', loadSearchHistory);
     </script>
 </body>
 </html>
