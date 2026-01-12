@@ -150,26 +150,39 @@ def find_matched_storage(target_path, storage_data):
     """
     根据目标路径匹配 AList 的挂载存储 (最长前缀匹配)
     """
-    # 格式化路径，确保以 / 开头，且末尾处理一致
+    if not target_path:
+        return None
+
+    # 统一规范化 target_path: 确保以 / 开头，去除首尾空白和尾部 /
+    # 例如: " /abc/def/ " -> "/abc/def", "/" -> "/"
+    target_path = "/" + target_path.strip().strip("/")
+    
     best_match = None
     max_len = -1
 
     for item in storage_data:
-        mount_path, driver = item['mount_path'], item['driver']
-        # 处理根目录匹配情况
-        formatted_mount = "/" + mount_path.strip("/")
+        mount_path = item.get('mount_path', '')
+        # 统一规范化 mount_path
+        mount_path = "/" + mount_path.strip().strip("/")
+        
+        # 匹配逻辑:
+        # 1. 根目录 / 特殊处理: 总是匹配
+        # 2. 精确匹配: target == mount
+        # 3. 前缀匹配: target starts with mount + "/" (确保是目录级匹配，避免 /movie1 匹配 /movie)
+        
+        is_match = False
+        
         if mount_path == "/":
-            formatted_mount = "/"
-
-        # 检查 target_path 是否以挂载点开头
-        # 注意：为了防止 /movie1 匹配到 /movie，通常会在末尾加 / 判断或精确匹配
-        check_path = target_path + "/"
-        check_mount = formatted_mount if formatted_mount == "/" else formatted_mount + "/"
-
-        if check_path.startswith(check_mount):
-            # 记录匹配长度最长的那个
-            if len(formatted_mount) > max_len:
-                max_len = len(formatted_mount)
+            is_match = True
+        elif target_path == mount_path:
+            is_match = True
+        elif target_path.startswith(mount_path + "/"):
+            is_match = True
+            
+        if is_match:
+            # 记录匹配长度最长的那个 (Mount Path 越长表示越具体的子目录挂载)
+            if len(mount_path) > max_len:
+                max_len = len(mount_path)
                 best_match = item
 
     return best_match
@@ -184,25 +197,68 @@ def transfer():
     full_path = full_path.rstrip('/')
 
     # 1. 获取所有存储并匹配 (用于获取 share_id)
-    # storages = get_alist_storages()
-    storages = [ga for ga in get_alist_storages() if ga['driver'] == 'AliyundriveShare2Open']
-    # for storage in storages:
-    #     print(storage['mount_path'], storage['id'])
-    matched_storage = find_matched_storage(full_path, storages)
-    # mount_path = ""
-    #
-    # for s in storages:
-    #     m_path = s.get('mount_path')
-    #     if not m_path: continue
-    #     if full_path == m_path or full_path.startswith(m_path + '/'):
-    #         if len(m_path) > len(mount_path):
-    #             mount_path = m_path
-    #             matched_storage = s
+    all_storages = get_alist_storages()
+    
+    # 迭代解析路径，处理 Alias 重定向
+    max_redirects = 5
+    matched_storage = None
+    mount_path = ""
+    
+    for _ in range(max_redirects):
+        matched_storage = find_matched_storage(full_path, all_storages)
 
-    if not matched_storage:
-        return jsonify({"status": "error", "message": "未找到对应的存储挂载，请确认路径是否正确"})
+        if not matched_storage:
+            return jsonify({"status": "error", "message": "未找到对应的存储挂载，请确认路径是否正确"})
 
-    mount_path = matched_storage['mount_path']
+        mount_path = matched_storage['mount_path']
+        driver = matched_storage['driver']
+
+        # 如果是 Alias，进行重定向解析
+        if driver == 'Alias':
+            try:
+                addition = json.loads(matched_storage.get('addition', '{}'))
+                paths_str = addition.get('paths', '')
+                # Alias 的 paths 可能有多行，通常取第一个
+                # 格式可能是 "目标存储名:/目标路径" 或直接 "/目标路径"
+                target_raw = paths_str.split('\n')[0].strip()
+                
+                # 解析目标路径：尝试去除 "Name:" 前缀
+                target_path_root = target_raw
+                if ':' in target_raw:
+                    # 分割 "Name:/Path" -> ["Name", "/Path"]
+                    parts = target_raw.split(':', 1)
+                    if len(parts) > 1 and parts[1].strip().startswith('/'):
+                        target_path_root = parts[1].strip()
+                
+                # 拼接新路径: TargetRoot + (FullPath - MountPath)
+                # 例如: Mount=/A, Full=/A/B, Target=/C -> New=/C/B
+                suffix = ""
+                if full_path == mount_path:
+                    suffix = ""
+                elif full_path.startswith(mount_path + "/"):
+                    suffix = full_path[len(mount_path):]
+                
+                # 更新 full_path 继续循环匹配
+                full_path = (target_path_root + suffix).replace('//', '/')
+                print(f"Alias redirection: {mount_path} -> {target_path_root} | New path: {full_path}")
+                continue
+                
+            except Exception as e:
+                print(f"Alias resolution failed: {e}")
+                return jsonify({"status": "error", "message": f"解析 Alias 挂载 '{mount_path}' 失败: {str(e)}"})
+
+        # 校验驱动类型
+        if driver != 'AliyundriveShare2Open':
+             return jsonify({
+                 "status": "error", 
+                 "message": f"匹配到的存储挂载 '{mount_path}' 类型为 '{driver}'。目前仅支持 'AliyundriveShare2Open' 类型挂载的转存，不支持此类型。"
+             })
+        
+        # 如果是支持的驱动，跳出循环继续后续逻辑
+        break
+
+    if not matched_storage: # Should be caught inside loop, but safety check
+         return jsonify({"status": "error", "message": "路径解析失败"})
 
     try:
         addition = json.loads(matched_storage.get('addition', '{}'))
