@@ -1,38 +1,57 @@
 import os
-import re
-from flask import Flask, render_template, request, jsonify
+import json
+import traceback
+
 import requests
+from flask import Flask, render_template, request, jsonify
 from dotenv import load_dotenv
+from urllib.parse import unquote
+from bs4 import BeautifulSoup
+from aligo import Aligo
 
 # 加载 .env 文件
 load_dotenv()
 
 app = Flask(__name__)
 
-# --- 配置信息 ---
-ALIST_URL = os.getenv("ALIST_URL", "http://localhost:5244")
+# --- 基础配置 ---
+ALIST_URL = os.getenv("ALIST_URL", "http://localhost:5234")
+XIAOYA_URL = os.getenv("XIAOYA_URL", "http://localhost:5678")
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
-DEST_PATH = os.getenv("DEST_PATH", "/")
-# 指向你宿主机上 index.txt 的路径 (如果在容器内运行，需挂载此文件)
-INDEX_FILE_PATH = os.getenv("INDEX_FILE_PATH", "/etc/xiaoya/index.txt")
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", 5000))
 
-# 全局变量：存储内存索引
-XIAOYA_INDEX = []
+# --- 阿里云盘配置 (aligo 模式) ---
+# 请在 .env 中设置 ALI_REFRESH_TOKEN
+ALI_REFRESH_TOKEN = os.getenv("ALI_REFRESH_TOKEN", "")
+# 目标文件夹 ID，默认为根目录
+ALI_TARGET_FOLDER_ID = os.getenv("ALI_TARGET_FOLDER_ID", "root")
+
+# 全局初始化 Aligo 实例
+# 注意：第一次启动时，如果没有 refresh_token，aligo 可能会在控制台打印二维码
+_ali_instance = None
 
 
-def load_index():
-    """程序启动时将几十万行索引加载进内存"""
-    global XIAOYA_INDEX
-    if os.path.exists(INDEX_FILE_PATH):
-        print("正在加载本地索引...")
-        with open(INDEX_FILE_PATH, 'r', encoding='utf-8') as f:
-            # 过滤掉空行
-            XIAOYA_INDEX = [line.strip() for line in f if line.strip()]
-        print(f"索引加载完成，共 {len(XIAOYA_INDEX)} 条资源。")
-    else:
-        print(f"未找到索引文件: {INDEX_FILE_PATH}，将降级使用 API 搜索。")
+def get_ali():
+    global _ali_instance
+    if _ali_instance is None:
+        if not ALI_REFRESH_TOKEN:
+            print("警告: 未设置 ALI_REFRESH_TOKEN，Aligo 将进入扫码模式")
+        _ali_instance = Aligo(refresh_token=ALI_REFRESH_TOKEN)
+    return _ali_instance
+
+
+def get_alist_storages():
+    """获取 Alist 所有存储挂载信息"""
+    try:
+        res = requests.get(f"{ALIST_URL}/api/admin/storage/list?page=1&per_page=0",
+                           headers={'Authorization': ADMIN_TOKEN})
+        data = res.json()
+        if data.get('code') == 200:
+            return data.get('data', {}).get('content', [])
+    except Exception as e:
+        print(f"Get storage list failed: {e}")
+    return []
 
 
 @app.route('/')
@@ -43,125 +62,130 @@ def index():
 @app.route('/api/search', methods=['POST'])
 def search():
     keyword = request.json.get('keyword', '')
-    if not XIAOYA_INDEX:
-        # 如果没加载成功索引，可以尝试降级回 API 搜索逻辑（略）
-        return jsonify({"status": "error", "message": "索引未加载"})
+    if not keyword:
+        return jsonify({"status": "error", "message": "请输入关键词"})
 
-    # 使用正则或简单的字符串包含进行模糊匹配
-    # 限制返回前 100 条，防止前端卡死
-    results = []
-    count = 0
-    for line in XIAOYA_INDEX:
-        if keyword.lower() in line.lower():
-            # 1. 提取实际路径（去掉 # 后的元数据）
-            full_path = line.split('#')[0]
-            # 2. 清理显示名称（去掉开头的 .）
-            display_name = full_path
-            if display_name.startswith('.'):
-                display_name = display_name[1:]
-            
-            results.append({
-                "name": display_name,  # 显示用的路径
-                "path": line           # 原始完整行，传给 transfer 接口
-            })
-            count += 1
-        if count >= 100: break
-
-    return jsonify({"status": "success", "results": results})
-
-
-def get_file_list(path):
-    """调用 Alist API 获取目录下文件列表"""
-    payload = {
-        "path": path,
-        "password": "",
-        "page": 1,
-        "per_page": 0,
-        "refresh": False
-    }
-    try:
-        res = requests.post(f"{ALIST_URL}/api/fs/list", json=payload, 
-                          headers={'Authorization': ADMIN_TOKEN})
-        data = res.json()
-        if data.get('code') == 200 and data.get('data') and data['data'].get('content'):
-            return [item['name'] for item in data['data']['content']]
-    except Exception as e:
-        print(f"List files error: {e}")
-    return None
-
-@app.route('/api/transfer', methods=['POST'])
-def transfer():
-    # 原始路径处理
-    raw_path = request.json.get('path', '')
-    clean_path = raw_path.split('#')[0]
-    if clean_path.startswith('.'):
-        clean_path = clean_path[1:]
-    if not clean_path.startswith('/'):
-        clean_path = '/' + clean_path
-    clean_path = clean_path.rstrip('/')
-
-    folder_name = clean_path.split('/')[-1]
-    if not folder_name:
-         return jsonify({"status": "error", "message": "无法解析文件名"})
-
-    print(f"Transferring: {clean_path}")
-
-    # --- 智能穿透策略 ---
-    # 1. 尝试列出该路径下的内容
-    # 如果能列出内容，说明是文件夹，且我们获取到了具体文件列表
-    # 这样我们可以直接复制“里面的东西”，而不是复制“文件夹本身”，规避虚拟目录问题
-    children_names = get_file_list(clean_path)
-    
-    headers = {'Authorization': ADMIN_TOKEN}
-
-    if children_names:
-        # 策略 A: 是文件夹，且获取到了内容 -> 复制内容到目标文件夹
-        print(f"Smart Mode: Found {len(children_names)} items inside. Copying content directly.")
-        
-        # 目标路径需要加上文件夹名，例如 /我的网盘/来自小雅/遮天
-        target_dst_dir = os.path.join(DEST_PATH, folder_name)
-        
-        payload = {
-            "src_dir": clean_path,       # 源目录就是用户点的这个文件夹
-            "names": children_names,     # 复制里面的所有文件名
-            "dst_dir": target_dst_dir    # 目标目录是设定的存盘路径+文件夹名
-        }
-    else:
-        # 策略 B: 是文件，或者空文件夹，或者列目录失败 -> 只能按原方式复制本体
-        print("Standard Mode: Copying item itself.")
-        src_dir = os.path.dirname(clean_path)
-        payload = {
-            "src_dir": src_dir,
-            "names": [folder_name],
-            "dst_dir": DEST_PATH
-        }
-
-    print(f"Payload: {payload}")
+    search_url = f"{XIAOYA_URL}/search"
+    params = {"box": keyword, "url": "", "type": "video"}
+    headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)'}
 
     try:
-        # 注意：如果目标文件夹不存在，Alist 的 Copy API 通常会自动创建，
-        # 但如果是深层目录可能需要确保父级存在。通常 Alist 处理得很好。
-        response = requests.post(f"{ALIST_URL}/api/fs/copy", json=payload, headers=headers)
-        
-        try:
-            res_json = response.json()
-            print(f"Alist Response: {res_json}")
-        except ValueError:
-            print(f"Error: Alist response is not JSON. Status: {response.status_code}")
-            return jsonify({"status": "error", "message": f"Alist API error: {response.status_code}"})
+        resp = requests.get(search_url, params=params, headers=headers)
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        results = []
+        seen_paths = set()
 
-        if res_json.get('code') == 200:
-            msg = f"转存任务已提交！包含 {len(children_names) if children_names else 1} 个项目。"
-            msg += " 请在 Alist 后台【管理-任务】中查看进度。"
-            return jsonify({"status": "success", "message": msg})
-        else:
-            return jsonify({"status": "error", "message": res_json.get('message', 'Unknown error')})
+        for link in soup.find_all('a'):
+            href = link.get('href')
+            if not href:
+                continue
 
+            # 过滤非资源链接（首页、外部链接等）
+            if href == '/' or href.startswith(('http://', 'https://', 'javascript:')):
+                continue
+
+            # 解码路径并规范化
+            candidate = unquote(href)
+            if not candidate.startswith('/'):
+                candidate = '/' + candidate
+
+            if candidate not in seen_paths:
+                if any(x in candidate for x in ['/@manage', '/@login']): continue
+                seen_paths.add(candidate)
+                results.append({"name": candidate.split('/')[-1], "path": candidate})
+
+        return jsonify({"status": "success", "results": results[:100]})
     except Exception as e:
-        print(f"Exception during transfer: {str(e)}")
         return jsonify({"status": "error", "message": str(e)})
 
 
+@app.route('/api/transfer', methods=['POST'])
+def transfer():
+    full_path = request.json.get('path', '').split('#')[0]
+    # 规范化路径
+    if full_path.startswith('.'): full_path = full_path[1:]
+    if not full_path.startswith('/'): full_path = '/' + full_path
+    full_path = full_path.rstrip('/')
+
+    # 1. 获取所有存储并匹配
+    storages = get_alist_storages()
+    matched_storage = None
+    mount_path = ""
+
+    # 寻找最长匹配的挂载路径
+    for s in storages:
+        m_path = s.get('mount_path')
+        if not m_path: continue
+        if full_path == m_path or full_path.startswith(m_path + '/'):
+            if len(m_path) > len(mount_path):
+                mount_path = m_path
+                matched_storage = s
+
+    if not matched_storage:
+        return jsonify({"status": "error", "message": "未找到对应的存储挂载，请确认路径是否正确"})
+
+    # 2. 从 addition 解析分享信息
+    try:
+        addition = json.loads(matched_storage.get('addition', '{}'))
+    except:
+        return jsonify({"status": "error", "message": "无法解析存储配置信息"})
+
+    share_id = addition.get('share_id')
+    share_pwd = addition.get('share_pwd', '')
+    # root_folder_id 可能是 'root' 或者具体的 ID
+    root_folder_id = 'root'
+    full_path_list = full_path.split('/')
+    if not share_id:
+        return jsonify({"status": "error", "message": "该路径不是阿里云盘分享挂载 (未找到 share_id)"})
+
+    try:
+        ali = get_ali()
+
+        # 3. 获取 Share Token
+        share_token_obj = ali.get_share_token(share_id, share_pwd=share_pwd)
+        share_token = share_token_obj.share_token
+
+        # 4. 递归查找目标文件/文件夹的 file_id
+        # 计算相对路径 parts
+        rel_path = full_path[len(mount_path):].strip('/')
+        parts = [p for p in rel_path.split('/') if p]
+
+        root_folders = ali.get_share_file_list(share_token_obj, parent_file_id="root")
+        parts = []
+        for root_folder in root_folders:
+            if root_folder.name in full_path_list:
+                parts = full_path_list[full_path_list.index(root_folder.name):]
+        current_file_id = root_folder_id
+        found = None
+        for i, part in enumerate(parts):
+            # 获取当前目录下的文件列表
+            # 注意: 这里的 parent_file_id 是在分享中的 ID
+            files = ali.get_share_file_list(share_token_obj, parent_file_id=current_file_id)
+
+            for f in files:
+                if f.name == part:
+                    current_file_id = f.file_id
+                    if part == parts[-1]:
+                        found = f
+                    break
+
+        # 5. 执行转存
+        # current_file_id 即为目标资源的 ID
+        share_file_list = ali.get_share_file_list(share_token_obj,
+                                                  parent_file_id=current_file_id)
+        batch_save_file = ali.batch_share_file_saveto_drive([i.file_id for i in share_file_list],
+                                                            share_token_obj, ALI_TARGET_FOLDER_ID)
+
+        return jsonify({
+            "status": "success",
+            "message": f"成功提交转存任务！资源 [{parts[-1] if parts else mount_path}] 已保存。"
+        })
+
+    except Exception as e:
+        traceback.print_exc()
+        print(f"Transfer error: {e}")
+        return jsonify({"status": "error", "message": f"转存失败: {str(e)}"})
+
+
 if __name__ == '__main__':
-    load_index()  # 启动前加载
     app.run(host=HOST, port=PORT)
