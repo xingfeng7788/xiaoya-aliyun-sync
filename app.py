@@ -202,6 +202,8 @@ def transfer():
     if not matched_storage:
         return jsonify({"status": "error", "message": "未找到对应的存储挂载，请确认路径是否正确"})
 
+    mount_path = matched_storage['mount_path']
+
     try:
         addition = json.loads(matched_storage.get('addition', '{}'))
     except:
