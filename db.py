@@ -220,11 +220,11 @@ def create_schedule_log(task_id, trigger_type='cron'):
     return cur.lastrowid
 
 
-def update_schedule_log(log_id, status, message='', detail=''):
+def update_schedule_log(log_id, status, message=''):
     conn = get_conn()
     conn.execute(
-        "UPDATE schedule_log SET status=?, message=?, detail=?, finished_at=CURRENT_TIMESTAMP WHERE id=?",
-        (status, message, detail, log_id)
+        "UPDATE schedule_log SET status=?, message=?, finished_at=CURRENT_TIMESTAMP WHERE id=?",
+        (status, message, log_id)
     )
     conn.commit()
 

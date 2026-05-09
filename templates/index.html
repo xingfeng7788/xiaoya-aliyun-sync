@@ -1439,6 +1439,9 @@
         }
 
         function showView(name) {
+            // 切换视图时停止日志轮询
+            if (name !== 'schViewLogs') _stopLogListTimer();
+            if (name !== 'schViewLogDetail') _stopLogDetailTimer();
             ['schViewList','schViewForm','schViewLogs','schViewLogDetail'].forEach(v =>
                 document.getElementById(v).classList.toggle('hidden', v !== name));
         }
@@ -1547,7 +1550,11 @@
         async function runTaskNow(id) {
             const res = await fetch(`/api/schedule/task/${id}/run`, { method: 'POST' });
             const data = await res.json();
-            alert(data.message);
+            if (data.status === 'success') {
+                showLogs(id);
+            } else {
+                alert(data.message);
+            }
         }
 
         // --- Local Dir Picker ---
@@ -1651,13 +1658,21 @@
         }
 
         // --- Logs ---
+        let _logListTimer = null;
         async function showLogs(taskId) {
             window._currentLogTaskId = taskId;
+            _stopLogListTimer();
             showView('schViewLogs');
             const el = document.getElementById('schLogList');
             el.innerHTML = '<div class="text-center text-gray-400 py-8"><i class="fas fa-spinner fa-spin"></i> 加载中...</div>';
+            await _loadLogList(taskId);
+        }
+        function _stopLogListTimer() {
+            if (_logListTimer) { clearTimeout(_logListTimer); _logListTimer = null; }
+        }
+        async function _loadLogList(taskId) {
+            const el = document.getElementById('schLogList');
             try {
-                // Get task name
                 const tRes = await fetch('/api/schedule/tasks');
                 const tData = await tRes.json();
                 const task = (tData.tasks || []).find(t => t.id === taskId);
@@ -1670,6 +1685,7 @@
                     el.innerHTML = '<div class="text-center text-gray-400 py-8">暂无执行记录</div>';
                     return;
                 }
+                const hasRunning = logs.some(l => l.status === 'running');
                 el.innerHTML = logs.map(l => {
                     let sc, st;
                     if (l.status === 'running') { sc = 'bg-blue-100 text-blue-700'; st = '执行中'; }
@@ -1689,12 +1705,26 @@
                         </div>
                     </div>`;
                 }).join('');
+                // 有执行中的任务时自动刷新
+                if (hasRunning && document.getElementById('schViewLogs') && !document.getElementById('schViewLogs').classList.contains('hidden')) {
+                    _logListTimer = setTimeout(() => _loadLogList(taskId), 3000);
+                }
             } catch(e) { el.innerHTML = `<div class="text-red-500 text-center py-4">${e}</div>`; }
         }
 
+        let _logDetailTimer = null;
         async function showLogDetail(logId) {
+            _stopLogListTimer();
+            _stopLogDetailTimer();
+            window._currentLogId = logId;
             showView('schViewLogDetail');
             document.getElementById('logDetailContent').textContent = '加载中...';
+            await _loadLogDetail(logId);
+        }
+        function _stopLogDetailTimer() {
+            if (_logDetailTimer) { clearTimeout(_logDetailTimer); _logDetailTimer = null; }
+        }
+        async function _loadLogDetail(logId) {
             try {
                 const res = await fetch(`/api/schedule/log/${logId}`);
                 const data = await res.json();
@@ -1710,6 +1740,13 @@
                 document.getElementById('logDetailEnd').textContent = l.finished_at || '-';
                 document.getElementById('logDetailTrigger').textContent = l.trigger_type === 'manual' ? '手动触发' : '定时触发';
                 document.getElementById('logDetailContent').textContent = l.detail || '（无详细日志）';
+                // 自动滚动到日志底部
+                const contentEl = document.getElementById('logDetailContent');
+                contentEl.scrollTop = contentEl.scrollHeight;
+                // 执行中时自动刷新
+                if (l.status === 'running' && document.getElementById('schViewLogDetail') && !document.getElementById('schViewLogDetail').classList.contains('hidden')) {
+                    _logDetailTimer = setTimeout(() => _loadLogDetail(logId), 2000);
+                }
             } catch(e) { document.getElementById('logDetailContent').textContent = `加载失败: ${e}`; }
         }
 
