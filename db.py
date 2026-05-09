@@ -1,5 +1,8 @@
 """SQLite 配置管理模块"""
-import sqlite3
+try:
+    import sqlite3
+except ModuleNotFoundError:
+    import pysqlite3 as sqlite3
 import os
 import json
 import hashlib

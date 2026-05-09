@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>登录 - 小雅资源助手</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+</head>
+<body class="bg-gradient-to-br from-indigo-50 via-purple-50 to-pink-50 min-h-screen flex items-center justify-center">
+    <div class="w-full max-w-md px-4">
+        <div class="bg-white rounded-2xl shadow-2xl p-8">
+            <div class="text-center mb-8">
+                <div class="inline-flex bg-gradient-to-r from-blue-600 to-purple-600 text-white p-4 rounded-2xl shadow-lg mb-4">
+                    <i class="fas fa-film text-3xl"></i>
+                </div>
+                <h1 class="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-700 to-purple-700">
+                    小雅资源助手
+                </h1>
+                <p class="text-gray-400 text-sm mt-1">请登录以继续</p>
+            </div>
+
+            <form id="loginForm" onsubmit="doLogin(event)">
+                <div class="mb-4">
+                    <label class="block text-sm font-medium text-gray-700 mb-1.5">
+                        <i class="fas fa-user text-gray-400 mr-1"></i>用户名
+                    </label>
+                    <input type="text" id="username" name="username" autocomplete="username" required
+                        class="w-full border border-gray-300 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition-all"
+                        placeholder="请输入用户名">
+                </div>
+                <div class="mb-6">
+                    <label class="block text-sm font-medium text-gray-700 mb-1.5">
+                        <i class="fas fa-lock text-gray-400 mr-1"></i>密码
+                    </label>
+                    <div class="relative">
+                        <input type="password" id="password" name="password" autocomplete="current-password" required
+                            class="w-full border border-gray-300 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition-all pr-10"
+                            placeholder="请输入密码">
+                        <button type="button" onclick="togglePasswordVisibility()" class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
+                            <i class="fas fa-eye" id="eyeIcon"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <div id="loginError" class="hidden mb-4 p-3 bg-red-50 border border-red-200 rounded-xl text-sm text-red-600">
+                    <i class="fas fa-exclamation-circle mr-1"></i><span id="loginErrorMsg"></span>
+                </div>
+
+                <button type="submit" id="loginBtn"
+                    class="w-full bg-gradient-to-r from-blue-600 to-purple-600 text-white py-3 rounded-xl font-medium hover:from-blue-700 hover:to-purple-700 shadow-lg hover:shadow-xl transition-all duration-300">
+                    <i class="fas fa-sign-in-alt mr-2"></i>登 录
+                </button>
+            </form>
+        </div>
+        <p class="text-center text-xs text-gray-400 mt-6">首次启动请查看控制台输出获取默认密码</p>
+    </div>
+
+    <script>
+        function togglePasswordVisibility() {
+            const pw = document.getElementById('password');
+            const icon = document.getElementById('eyeIcon');
+            if (pw.type === 'password') {
+                pw.type = 'text';
+                icon.className = 'fas fa-eye-slash';
+            } else {
+                pw.type = 'password';
+                icon.className = 'fas fa-eye';
+            }
+        }
+
+        async function doLogin(e) {
+            e.preventDefault();
+            const btn = document.getElementById('loginBtn');
+            const errDiv = document.getElementById('loginError');
+            const errMsg = document.getElementById('loginErrorMsg');
+
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>登录中...';
+            errDiv.classList.add('hidden');
+
+            try {
+                const res = await fetch('/api/auth/login', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        username: document.getElementById('username').value.trim(),
+                        password: document.getElementById('password').value,
+                    })
+                });
+                const data = await res.json();
+                if (data.status === 'success') {
+                    window.location.href = '/';
+                } else {
+                    errMsg.textContent = data.message;
+                    errDiv.classList.remove('hidden');
+                }
+            } catch (err) {
+                errMsg.textContent = '网络错误，请重试';
+                errDiv.classList.remove('hidden');
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fas fa-sign-in-alt mr-2"></i>登 录';
+            }
+        }
+
+        // 自动聚焦用户名
+        document.getElementById('username').focus();
+    </script>
+</body>
+</html>
