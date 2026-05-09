@@ -23,7 +23,11 @@ from aligo.core.Config import (
 
 from db import (
     init_db, get_config, set_config, delete_config,
-    get_all_configs, save_ali_token, get_ali_token, sync_env_to_db
+    get_all_configs, save_ali_token, get_ali_token, sync_env_to_db,
+    create_schedule_task, update_schedule_task, delete_schedule_task,
+    get_all_schedule_tasks, get_schedule_task, toggle_schedule_task,
+    create_schedule_log, update_schedule_log, append_schedule_log_detail,
+    get_schedule_logs, get_schedule_log_detail,
 )
 
 # 加载 .env 文件
@@ -76,11 +80,12 @@ def get_ali(force_new=False):
                 notify_token_expired()
             raise
         # 登录成功后，保存 token 到数据库
-        if _ali_instance.token:
+        _token = getattr(getattr(_ali_instance, '_auth', None), 'token', None)
+        if _token and _token.refresh_token:
             save_ali_token(
-                refresh_token=_ali_instance.token.refresh_token,
-                access_token=_ali_instance.token.access_token,
-                token_data=_ali_instance.token.to_dict() if hasattr(_ali_instance.token, 'to_dict') else None
+                refresh_token=_token.refresh_token,
+                access_token=_token.access_token,
+                token_data=_token.to_dict() if hasattr(_token, 'to_dict') else None
             )
     return _ali_instance
 
@@ -184,9 +189,16 @@ def _start_qr_login():
 
 
 def _is_auth_error(e):
-    """判断是否为认证相关错误"""
+    """判断是否为认证相关错误（仅匹配真正的登录失效）"""
+    from aligo.error import AligoRefreshFailed, AligoFatalError
+    if isinstance(e, AligoRefreshFailed):
+        return True
     msg = str(e).lower()
-    return any(kw in msg for kw in ['refreshfailed', 'token', 'unauthorized', '401', 'invalidtoken', 'expired'])
+    # 只匹配明确的认证失败关键词，避免误判
+    return any(kw in msg for kw in [
+        'refreshfailed', 'refresh_token 刷新 token 失败',
+        'invalidtoken', 'accesstokeninvalid',
+    ])
 
 
 # ==================== PushPlus 通知 ====================
@@ -249,11 +261,12 @@ def notify_token_expired():
 def _sync_token_to_db(ali):
     """将 aligo 实例中最新的 token 同步到数据库（aligo 内部自动刷新后 token 会变）"""
     try:
-        if ali and ali.token and ali.token.refresh_token:
+        _token = getattr(getattr(ali, '_auth', None), 'token', None)
+        if ali and _token and _token.refresh_token:
             save_ali_token(
-                refresh_token=ali.token.refresh_token,
-                access_token=ali.token.access_token,
-                token_data=ali.token.to_dict() if hasattr(ali.token, 'to_dict') else None
+                refresh_token=_token.refresh_token,
+                access_token=_token.access_token,
+                token_data=_token.to_dict() if hasattr(_token, 'to_dict') else None
             )
     except Exception:
         pass
@@ -814,7 +827,9 @@ def transfer():
              return jsonify({"status": "error", "message": "无法定位目标文件"})
 
         target_name = found_target.name
-        save_to_parent_id = cfg('ALI_TARGET_FOLDER_ID', 'root')
+        # 优先使用用户选择的目标目录，否则使用默认配置
+        target_folder_id = request.json.get('target_folder_id') or cfg('ALI_TARGET_FOLDER_ID', 'root')
+        save_to_parent_id = target_folder_id
         
         # 如果是文件：创建同名文件夹（去后缀），转存该文件
         if getattr(found_target, 'type', 'folder') == 'file':
@@ -823,7 +838,7 @@ def transfer():
             
             # 创建目标目录
             try:
-                new_folder = ali.create_folder(target_name, cfg('ALI_TARGET_FOLDER_ID', 'root'))
+                new_folder = ali.create_folder(target_name, target_folder_id)
                 if new_folder:
                     save_to_parent_id = new_folder.file_id
                     ali.batch_share_file_saveto_drive(transfer_file_ids, share_token_obj, save_to_parent_id)
@@ -833,7 +848,7 @@ def transfer():
         else:
             # 如果是文件夹（或 Root）：创建同名文件夹，递归转存
             try:
-                new_folder = ali.create_folder(target_name, cfg('ALI_TARGET_FOLDER_ID', 'root'))
+                new_folder = ali.create_folder(target_name, target_folder_id)
                 if new_folder:
                     save_to_parent_id = new_folder.file_id
                     # 使用递归转存
@@ -985,6 +1000,260 @@ def pushplus_test():
         return jsonify({"status": "success", "message": "测试通知已发送，请检查微信"})
     else:
         return jsonify({"status": "error", "message": "发送失败，请检查 PUSHPLUS_TOKEN 是否正确"})
+
+
+# ==================== 定时调度功能 ====================
+
+from scheduler import (
+    set_upload_func, start_scheduler, reload_all_tasks,
+    add_task_job, remove_task_job, run_task_manual, get_job_next_run,
+    set_token_check_func, set_token_refresh_func
+)
+from datetime import datetime
+
+
+def _execute_upload_task(task, log_id):
+    """执行上传任务的具体逻辑"""
+    local_dir = task['local_dir']
+    remote_folder_id = task['remote_folder_id']
+
+    try:
+        ali = get_ali()
+    except Exception as e:
+        append_schedule_log_detail(log_id, f"[ERROR] 阿里云盘登录失败: {e}")
+        update_schedule_log(log_id, 'failed', f"登录失败: {e}")
+        if _is_auth_error(e):
+            notify_token_expired()
+        return
+
+    uploaded_count = 0
+    failed_count = 0
+    skipped_count = 0
+
+    try:
+        entries = os.listdir(local_dir)
+        append_schedule_log_detail(log_id, f"扫描到 {len(entries)} 个文件/文件夹")
+
+        for entry_name in entries:
+            full_path = os.path.join(local_dir, entry_name)
+            try:
+                if os.path.isfile(full_path):
+                    append_schedule_log_detail(log_id, f"上传文件: {entry_name}")
+                    ali.upload_file(full_path, parent_file_id=remote_folder_id)
+                    uploaded_count += 1
+                    append_schedule_log_detail(log_id, f"  ✓ 上传成功: {entry_name}")
+                elif os.path.isdir(full_path):
+                    append_schedule_log_detail(log_id, f"上传文件夹: {entry_name}")
+                    ali.upload_folder(full_path, parent_file_id=remote_folder_id)
+                    uploaded_count += 1
+                    append_schedule_log_detail(log_id, f"  ✓ 上传成功: {entry_name}")
+                else:
+                    skipped_count += 1
+            except Exception as e:
+                failed_count += 1
+                append_schedule_log_detail(log_id, f"  ✗ 上传失败 {entry_name}: {e}")
+
+        msg = f"完成: 成功 {uploaded_count}, 失败 {failed_count}, 跳过 {skipped_count}"
+        append_schedule_log_detail(log_id, f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
+        status = 'success' if failed_count == 0 else 'partial'
+        update_schedule_log(log_id, status, msg)
+
+    except Exception as e:
+        append_schedule_log_detail(log_id, f"[ERROR] {e}")
+        update_schedule_log(log_id, 'failed', str(e))
+    finally:
+        _sync_token_to_db(ali)
+
+
+def _check_token_valid():
+    """检测阿里云盘 Token 是否有效，失效则发送通知"""
+    token_info = get_ali_token()
+    if not token_info or not token_info.get('refresh_token'):
+        notify_token_expired()
+        return False
+    try:
+        ali = get_ali()
+        ali.get_user()
+        return True
+    except Exception as e:
+        if _is_auth_error(e):
+            notify_token_expired()
+        return False
+
+
+def _refresh_token_task():
+    """主动刷新阿里云盘 Token 以延长有效期"""
+    token_info = get_ali_token()
+    if not token_info or not token_info.get('refresh_token'):
+        return False
+    try:
+        ali = get_ali()
+        # 调用 aligo 内部的 _refresh_token 主动刷新
+        if hasattr(ali, '_auth') and hasattr(ali._auth, '_refresh_token'):
+            ali._auth._refresh_token()
+        else:
+            # 退而求其次：调用一个轻量 API 触发 aligo 内部的自动刷新机制
+            ali.get_user()
+        _sync_token_to_db(ali)
+        return True
+    except Exception as e:
+        if _is_auth_error(e):
+            notify_token_expired()
+        return False
+
+
+# 注入上传函数并启动调度器
+set_upload_func(_execute_upload_task)
+set_token_check_func(_check_token_valid)
+set_token_refresh_func(_refresh_token_task)
+start_scheduler()
+
+
+@app.route('/api/schedule/tasks', methods=['GET'])
+def schedule_task_list():
+    """获取所有调度任务"""
+    tasks = get_all_schedule_tasks()
+    for t in tasks:
+        t['next_run'] = get_job_next_run(t['id']) if t['enabled'] else None
+    return jsonify({"status": "success", "tasks": tasks})
+
+
+@app.route('/api/schedule/task', methods=['POST'])
+def schedule_task_create():
+    """创建调度任务"""
+    data = request.json or {}
+    name = data.get('name', '').strip()
+    local_dir = data.get('local_dir', '').strip()
+    remote_folder_id = data.get('remote_folder_id', 'root').strip()
+    remote_folder_name = data.get('remote_folder_name', '根目录').strip()
+    cron_expr = data.get('cron_expr', '').strip()
+
+    if not name:
+        return jsonify({"status": "error", "message": "任务名称不能为空"})
+    if not local_dir:
+        return jsonify({"status": "error", "message": "本地目录不能为空"})
+    if not cron_expr:
+        return jsonify({"status": "error", "message": "Cron 表达式不能为空"})
+
+    # 校验 cron 表达式
+    from apscheduler.triggers.cron import CronTrigger
+    try:
+        CronTrigger.from_crontab(cron_expr)
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"无效的 Cron 表达式: {e}"})
+
+    task_id = create_schedule_task(name, local_dir, remote_folder_id, remote_folder_name, cron_expr)
+    add_task_job(task_id, cron_expr)
+    return jsonify({"status": "success", "message": "任务创建成功", "task_id": task_id})
+
+
+@app.route('/api/schedule/task/<int:task_id>', methods=['PUT'])
+def schedule_task_update(task_id):
+    """更新调度任务"""
+    task = get_schedule_task(task_id)
+    if not task:
+        return jsonify({"status": "error", "message": "任务不存在"})
+
+    data = request.json or {}
+    name = data.get('name', task['name']).strip()
+    local_dir = data.get('local_dir', task['local_dir']).strip()
+    remote_folder_id = data.get('remote_folder_id', task['remote_folder_id']).strip()
+    remote_folder_name = data.get('remote_folder_name', task['remote_folder_name']).strip()
+    cron_expr = data.get('cron_expr', task['cron_expr']).strip()
+    enabled = data.get('enabled', task['enabled'])
+
+    from apscheduler.triggers.cron import CronTrigger
+    try:
+        CronTrigger.from_crontab(cron_expr)
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"无效的 Cron 表达式: {e}"})
+
+    update_schedule_task(task_id, name, local_dir, remote_folder_id, remote_folder_name, cron_expr, enabled)
+    if enabled:
+        add_task_job(task_id, cron_expr)
+    else:
+        remove_task_job(task_id)
+    return jsonify({"status": "success", "message": "任务已更新"})
+
+
+@app.route('/api/schedule/task/<int:task_id>', methods=['DELETE'])
+def schedule_task_delete(task_id):
+    """删除调度任务"""
+    remove_task_job(task_id)
+    delete_schedule_task(task_id)
+    return jsonify({"status": "success", "message": "任务已删除"})
+
+
+@app.route('/api/schedule/task/<int:task_id>/toggle', methods=['POST'])
+def schedule_task_toggle(task_id):
+    """启用/禁用调度任务"""
+    task = get_schedule_task(task_id)
+    if not task:
+        return jsonify({"status": "error", "message": "任务不存在"})
+
+    new_enabled = 0 if task['enabled'] else 1
+    toggle_schedule_task(task_id, new_enabled)
+    if new_enabled:
+        add_task_job(task_id, task['cron_expr'])
+    else:
+        remove_task_job(task_id)
+    return jsonify({"status": "success", "enabled": new_enabled})
+
+
+@app.route('/api/schedule/task/<int:task_id>/run', methods=['POST'])
+def schedule_task_run(task_id):
+    """手动触发任务"""
+    task = get_schedule_task(task_id)
+    if not task:
+        return jsonify({"status": "error", "message": "任务不存在"})
+    run_task_manual(task_id)
+    return jsonify({"status": "success", "message": f"任务 [{task['name']}] 已开始执行"})
+
+
+@app.route('/api/schedule/task/<int:task_id>/logs', methods=['GET'])
+def schedule_task_logs(task_id):
+    """获取任务执行日志列表"""
+    logs = get_schedule_logs(task_id, limit=50)
+    return jsonify({"status": "success", "logs": logs})
+
+
+@app.route('/api/schedule/log/<int:log_id>', methods=['GET'])
+def schedule_log_detail(log_id):
+    """获取日志详情"""
+    log = get_schedule_log_detail(log_id)
+    if not log:
+        return jsonify({"status": "error", "message": "日志不存在"})
+    return jsonify({"status": "success", "log": log})
+
+
+@app.route('/api/schedule/local_dirs', methods=['POST'])
+def list_local_dirs():
+    """浏览本地目录结构"""
+    path = request.json.get('path', '/')
+    if not path:
+        path = '/'
+
+    # 安全检查：规范化路径
+    path = os.path.normpath(os.path.abspath(path))
+
+    if not os.path.exists(path):
+        return jsonify({"status": "error", "message": "目录不存在"})
+    if not os.path.isdir(path):
+        return jsonify({"status": "error", "message": "不是目录"})
+
+    try:
+        entries = []
+        for entry in os.scandir(path):
+            if entry.is_dir():
+                entries.append({'name': entry.name, 'path': entry.path, 'type': 'folder'})
+        entries.sort(key=lambda x: x['name'].lower())
+
+        parent = os.path.dirname(path) if path != os.path.dirname(path) else None
+        return jsonify({"status": "success", "path": path, "parent": parent, "dirs": entries})
+    except PermissionError:
+        return jsonify({"status": "error", "message": "无权访问该目录"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)})
 
 
 if __name__ == '__main__':

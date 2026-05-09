@@ -31,6 +31,12 @@
                     </span>
                 </div>
                 <div class="flex items-center gap-2">
+                    <button onclick="openSchedulerModal()" class="group flex items-center gap-2 bg-white border border-gray-200 text-gray-600 px-4 py-2 rounded-full hover:border-green-400 hover:text-green-600 hover:shadow-md transition-all duration-300">
+                        <div class="bg-green-100 text-green-600 rounded-full p-1.5 group-hover:bg-green-600 group-hover:text-white transition-colors">
+                            <i class="fas fa-clock"></i>
+                        </div>
+                        <span class="text-sm font-medium">定时任务</span>
+                    </button>
                     <button onclick="openSettingsModal()" class="group flex items-center gap-2 bg-white border border-gray-200 text-gray-600 px-4 py-2 rounded-full hover:border-purple-400 hover:text-purple-600 hover:shadow-md transition-all duration-300">
                         <div class="bg-purple-100 text-purple-600 rounded-full p-1.5 group-hover:bg-purple-600 group-hover:text-white transition-colors">
                             <i class="fas fa-cog"></i>
@@ -114,6 +120,41 @@
             <p class="text-gray-500">输入关键词开始搜索</p>
         </div>
     </main>
+
+    <!-- Transfer Folder Picker Modal -->
+    <div id="transferPickerModal" class="fixed inset-0 z-[60] hidden" role="dialog" aria-modal="true">
+        <div class="fixed inset-0 bg-gray-900/60 backdrop-blur-sm transition-opacity opacity-0" id="tpBackdrop"></div>
+        <div class="fixed inset-0 z-10 overflow-y-auto">
+            <div class="flex min-h-full items-center justify-center p-4">
+                <div class="relative transform overflow-hidden rounded-2xl bg-white text-left shadow-2xl transition-all sm:w-full sm:max-w-lg opacity-0 translate-y-4" id="tpPanel">
+                    <div class="bg-gradient-to-r from-green-50 to-white px-5 py-3 border-b border-gray-100 flex items-center justify-between">
+                        <div class="flex items-center gap-2">
+                            <div class="bg-green-100 p-1.5 rounded-lg text-green-600"><i class="fas fa-folder-open"></i></div>
+                            <h3 class="text-sm font-bold text-gray-900">选择转存目录</h3>
+                        </div>
+                        <button onclick="closeTransferPicker()" class="text-gray-400 hover:text-gray-600 rounded-full p-1.5 transition-colors"><i class="fas fa-times"></i></button>
+                    </div>
+                    <div class="px-5 py-3">
+                        <div class="flex items-center gap-2 mb-3 text-xs text-gray-500">
+                            <button onclick="tpNav('root')" class="px-2 py-1 bg-gray-100 border rounded hover:bg-gray-200"><i class="fas fa-home"></i></button>
+                            <button onclick="tpNavUp()" id="tpUpBtn" class="hidden px-2 py-1 bg-gray-100 border rounded hover:bg-gray-200"><i class="fas fa-level-up-alt"></i></button>
+                            <span class="font-mono truncate text-gray-700" id="tpCurrentName">根目录</span>
+                        </div>
+                        <div class="border rounded-lg bg-gray-50 p-2 min-h-[200px] max-h-[300px] overflow-y-auto" id="tpEntries">
+                            <div class="text-center text-gray-400 py-8"><i class="fas fa-spinner fa-spin"></i></div>
+                        </div>
+                    </div>
+                    <div class="bg-gray-50 px-5 py-3 flex justify-between items-center border-t">
+                        <span class="text-xs text-gray-400">当前: <span id="tpSelectedLabel" class="text-gray-700 font-medium">根目录</span></span>
+                        <div class="flex gap-2">
+                            <button onclick="closeTransferPicker()" class="px-4 py-1.5 border rounded-lg text-sm text-gray-600 hover:bg-gray-100">取消</button>
+                            <button onclick="confirmTransferFolder()" class="px-4 py-1.5 bg-green-600 text-white rounded-lg text-sm hover:bg-green-700"><i class="fas fa-check mr-1"></i>转存到此目录</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
 
     <!-- Aliyun Drive Modal -->
     <div id="aliModal" class="fixed inset-0 z-50 hidden" aria-labelledby="modal-title" role="dialog" aria-modal="true">
@@ -320,12 +361,16 @@
         async function transferByIndex(index) {
             const item = window.currentResults[index];
             if (!item) return;
-            
-            const buttons = document.querySelectorAll('button');
-            // Find the specific button clicked based on logic (simplified here for brevity)
-            // A more robust way would be to pass `this` to the function
+            // 弹出云盘目录选择器
+            openTransferFolderPicker(index);
+        }
+
+        async function doTransfer(index, targetFolderId, targetFolderName) {
+            const item = window.currentResults[index];
+            if (!item) return;
+
             const allTransferBtns = Array.from(document.querySelectorAll('button')).filter(b => b.textContent.includes('一键转存'));
-            const targetBtn = allTransferBtns[index]; // Assuming order matches
+            const targetBtn = allTransferBtns[index];
 
             if (targetBtn) {
                 const originalHtml = targetBtn.innerHTML;
@@ -337,7 +382,10 @@
                     const res = await fetch('/api/transfer', {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({path: item.path})
+                        body: JSON.stringify({
+                            path: item.path,
+                            target_folder_id: targetFolderId || undefined,
+                        })
                     });
                     const data = await res.json();
                     alert(data.message);
@@ -348,6 +396,87 @@
                     targetBtn.innerHTML = originalHtml;
                     targetBtn.classList.remove('bg-gray-100', 'text-gray-400');
                 }
+            }
+        }
+
+        // ========== Transfer Folder Picker ==========
+        let _tpCurrentId = 'root';
+        let _tpCurrentName = '根目录';
+        let _tpHistory = [];
+        let _tpTransferIndex = null;
+
+        function openTransferFolderPicker(index) {
+            _tpTransferIndex = index;
+            _tpCurrentId = 'root';
+            _tpCurrentName = '根目录';
+            _tpHistory = [];
+            const m = document.getElementById('transferPickerModal');
+            m.classList.remove('hidden');
+            setTimeout(() => {
+                document.getElementById('tpBackdrop').classList.remove('opacity-0');
+                document.getElementById('tpPanel').classList.remove('opacity-0', 'translate-y-4');
+            }, 10);
+            tpNav('root');
+        }
+
+        function closeTransferPicker() {
+            document.getElementById('tpBackdrop').classList.add('opacity-0');
+            document.getElementById('tpPanel').classList.add('opacity-0', 'translate-y-4');
+            setTimeout(() => document.getElementById('transferPickerModal').classList.add('hidden'), 300);
+        }
+
+        async function tpNav(folderId, folderName) {
+            const el = document.getElementById('tpEntries');
+            el.innerHTML = '<div class="text-center text-gray-400 py-8"><i class="fas fa-spinner fa-spin"></i></div>';
+            try {
+                const res = await fetch('/api/aliyun/files', {
+                    method: 'POST', headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify({parent_file_id: folderId})
+                });
+                const data = await res.json();
+                if (data.status !== 'success') { el.innerHTML = `<div class="text-red-500 text-center py-4">${data.message}</div>`; return; }
+
+                if (folderId !== _tpCurrentId && folderId !== 'root') {
+                    _tpHistory.push({id: _tpCurrentId, name: _tpCurrentName});
+                } else if (folderId === 'root') {
+                    _tpHistory = [];
+                }
+                _tpCurrentId = folderId;
+                _tpCurrentName = folderName || (data.current_folder ? data.current_folder.name : '根目录');
+
+                document.getElementById('tpCurrentName').textContent = _tpCurrentName;
+                document.getElementById('tpSelectedLabel').textContent = _tpCurrentName;
+                document.getElementById('tpUpBtn').classList.toggle('hidden', _tpHistory.length === 0);
+
+                const folders = (data.files || []).filter(f => f.type === 'folder');
+                if (folders.length === 0) {
+                    el.innerHTML = '<div class="text-xs text-gray-400 text-center py-6">无子文件夹</div>';
+                } else {
+                    el.innerHTML = folders.map(f => `
+                        <div class="flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-white cursor-pointer text-sm transition-colors" onclick="tpNav('${f.file_id}','${f.name.replace(/'/g,"\\'")}')">
+                            <i class="fas fa-folder text-yellow-400"></i>
+                            <span class="flex-1 truncate text-gray-700">${f.name}</span>
+                            <i class="fas fa-chevron-right text-gray-300 text-xs"></i>
+                        </div>
+                    `).join('');
+                }
+            } catch(e) { el.innerHTML = `<div class="text-red-500 text-center py-4">加载失败</div>`; }
+        }
+
+        function tpNavUp() {
+            if (_tpHistory.length > 0) {
+                const prev = _tpHistory.pop();
+                _tpCurrentId = prev.id;
+                _tpCurrentName = prev.name;
+                tpNav(prev.id, prev.name);
+                _tpHistory.pop(); // tpNav will push again
+            }
+        }
+
+        function confirmTransferFolder() {
+            closeTransferPicker();
+            if (_tpTransferIndex !== null) {
+                doTransfer(_tpTransferIndex, _tpCurrentId, _tpCurrentName);
             }
         }
 
@@ -641,6 +770,127 @@
         document.addEventListener('DOMContentLoaded', loadSearchHistory);
     </script>
 
+    <!-- Scheduler Modal -->
+    <div id="schedulerModal" class="fixed inset-0 z-50 hidden" role="dialog" aria-modal="true">
+        <div class="fixed inset-0 bg-gray-900/60 backdrop-blur-sm transition-opacity opacity-0" id="schedulerBackdrop"></div>
+        <div class="fixed inset-0 z-10 overflow-y-auto">
+            <div class="flex min-h-full items-center justify-center p-4">
+                <div class="relative transform overflow-hidden rounded-2xl bg-white text-left shadow-2xl transition-all sm:w-full sm:max-w-4xl opacity-0 translate-y-4" id="schedulerPanel">
+                    <!-- Header -->
+                    <div class="bg-gradient-to-r from-green-50 to-white px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+                        <div class="flex items-center gap-3">
+                            <div class="bg-green-100 p-2 rounded-lg text-green-600"><i class="fas fa-clock"></i></div>
+                            <div>
+                                <h3 class="text-lg font-bold text-gray-900" id="schedulerTitle">定时上传任务</h3>
+                                <p class="text-xs text-gray-400">自动将本地目录同步上传到阿里云盘</p>
+                            </div>
+                        </div>
+                        <button onclick="closeSchedulerModal()" class="text-gray-400 hover:text-gray-600 rounded-full p-2 transition-colors"><i class="fas fa-times text-xl"></i></button>
+                    </div>
+                    <!-- Body: 3 views toggled via JS -->
+                    <div class="px-6 py-4 min-h-[400px] max-h-[70vh] overflow-y-auto">
+
+                        <!-- View 1: Task List -->
+                        <div id="schViewList">
+                            <div class="flex justify-between items-center mb-4">
+                                <span class="text-sm text-gray-500" id="schTaskCount">0 个任务</span>
+                                <button onclick="showTaskForm()" class="px-4 py-1.5 bg-green-600 text-white rounded-lg text-sm hover:bg-green-700 transition-colors">
+                                    <i class="fas fa-plus mr-1"></i>新建任务
+                                </button>
+                            </div>
+                            <div id="schTaskList" class="space-y-3">
+                                <div class="text-center text-gray-400 py-12"><i class="fas fa-inbox text-3xl mb-2 block opacity-50"></i>暂无任务</div>
+                            </div>
+                        </div>
+
+                        <!-- View 2: Task Form (Create/Edit) -->
+                        <div id="schViewForm" class="hidden">
+                            <button onclick="showTaskList()" class="text-sm text-gray-500 hover:text-gray-700 mb-4 inline-flex items-center gap-1"><i class="fas fa-arrow-left"></i> 返回列表</button>
+                            <h4 class="text-base font-bold text-gray-800 mb-4" id="schFormTitle">新建任务</h4>
+                            <input type="hidden" id="schEditId">
+                            <div class="space-y-4">
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">任务名称</label>
+                                    <input type="text" id="schName" placeholder="例如：每日备份照片" class="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-green-400 outline-none">
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">本地目录</label>
+                                    <div class="flex gap-2">
+                                        <input type="text" id="schLocalDir" placeholder="例如：/data/photos" class="flex-1 border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-green-400 outline-none font-mono">
+                                        <button onclick="openLocalDirPicker()" class="px-3 py-2 bg-gray-100 border rounded-lg text-sm hover:bg-gray-200 transition-colors whitespace-nowrap"><i class="fas fa-folder-open mr-1"></i>浏览</button>
+                                    </div>
+                                </div>
+                                <!-- Local Dir Picker -->
+                                <div id="localDirPicker" class="hidden border rounded-lg bg-gray-50 p-3 max-h-48 overflow-y-auto">
+                                    <div class="flex items-center gap-2 mb-2 text-xs text-gray-500">
+                                        <button onclick="localDirNav('..')" class="px-2 py-1 bg-white border rounded hover:bg-gray-100"><i class="fas fa-level-up-alt"></i></button>
+                                        <span id="localDirCurrent" class="font-mono truncate">/</span>
+                                    </div>
+                                    <div id="localDirEntries" class="space-y-1"></div>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">云盘目标目录</label>
+                                    <div class="flex gap-2 items-center">
+                                        <span id="schRemoteName" class="flex-1 px-3 py-2 bg-gray-50 border rounded-lg text-sm text-gray-600 truncate">根目录</span>
+                                        <input type="hidden" id="schRemoteId" value="root">
+                                        <button onclick="openRemoteFolderPicker()" class="px-3 py-2 bg-blue-50 border border-blue-200 rounded-lg text-sm text-blue-600 hover:bg-blue-100 transition-colors whitespace-nowrap"><i class="fas fa-cloud mr-1"></i>选择</button>
+                                    </div>
+                                </div>
+                                <!-- Remote Folder Picker -->
+                                <div id="remoteFolderPicker" class="hidden border rounded-lg bg-blue-50/50 p-3 max-h-48 overflow-y-auto">
+                                    <div class="flex items-center gap-2 mb-2 text-xs text-gray-500">
+                                        <button onclick="remoteNav('root')" class="px-2 py-1 bg-white border rounded hover:bg-gray-100"><i class="fas fa-home"></i></button>
+                                        <button onclick="remoteNavUp()" id="remoteUpBtn" class="hidden px-2 py-1 bg-white border rounded hover:bg-gray-100"><i class="fas fa-level-up-alt"></i></button>
+                                        <span id="remoteCurrentPath" class="font-mono truncate">根目录</span>
+                                    </div>
+                                    <div id="remoteEntries" class="space-y-1"></div>
+                                    <button onclick="confirmRemoteFolder()" class="mt-2 w-full py-1.5 bg-blue-600 text-white rounded-lg text-xs hover:bg-blue-700">确认选择当前目录</button>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">Cron 表达式</label>
+                                    <input type="text" id="schCron" placeholder="例如：0 2 * * *（每天凌晨2点）" class="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-green-400 outline-none font-mono">
+                                    <div class="mt-1 flex flex-wrap gap-1">
+                                        <button onclick="setCron('0 2 * * *')" class="px-2 py-0.5 bg-gray-100 rounded text-xs text-gray-600 hover:bg-green-100 hover:text-green-700">每天2:00</button>
+                                        <button onclick="setCron('0 */6 * * *')" class="px-2 py-0.5 bg-gray-100 rounded text-xs text-gray-600 hover:bg-green-100 hover:text-green-700">每6小时</button>
+                                        <button onclick="setCron('*/30 * * * *')" class="px-2 py-0.5 bg-gray-100 rounded text-xs text-gray-600 hover:bg-green-100 hover:text-green-700">每30分钟</button>
+                                        <button onclick="setCron('0 0 * * 0')" class="px-2 py-0.5 bg-gray-100 rounded text-xs text-gray-600 hover:bg-green-100 hover:text-green-700">每周日0:00</button>
+                                        <button onclick="setCron('0 0 1 * *')" class="px-2 py-0.5 bg-gray-100 rounded text-xs text-gray-600 hover:bg-green-100 hover:text-green-700">每月1号0:00</button>
+                                    </div>
+                                </div>
+                                <div class="pt-2">
+                                    <button onclick="saveTask()" class="w-full py-2.5 bg-green-600 text-white rounded-lg font-medium hover:bg-green-700 transition-colors"><i class="fas fa-save mr-1"></i>保存任务</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- View 3: Task Logs -->
+                        <div id="schViewLogs" class="hidden">
+                            <button onclick="showTaskList()" class="text-sm text-gray-500 hover:text-gray-700 mb-4 inline-flex items-center gap-1"><i class="fas fa-arrow-left"></i> 返回列表</button>
+                            <h4 class="text-base font-bold text-gray-800 mb-3" id="schLogsTitle">执行日志</h4>
+                            <div id="schLogList" class="space-y-2"></div>
+                        </div>
+
+                        <!-- View 4: Log Detail -->
+                        <div id="schViewLogDetail" class="hidden">
+                            <button onclick="showLogs(window._currentLogTaskId)" class="text-sm text-gray-500 hover:text-gray-700 mb-4 inline-flex items-center gap-1"><i class="fas fa-arrow-left"></i> 返回日志列表</button>
+                            <div class="flex items-center gap-2 mb-3">
+                                <h4 class="text-base font-bold text-gray-800">日志详情</h4>
+                                <span id="logDetailStatus" class="text-xs px-2 py-0.5 rounded-full"></span>
+                            </div>
+                            <div class="flex gap-4 text-xs text-gray-400 mb-3">
+                                <span><i class="fas fa-play mr-1"></i><span id="logDetailStart"></span></span>
+                                <span><i class="fas fa-stop mr-1"></i><span id="logDetailEnd"></span></span>
+                                <span><i class="fas fa-bolt mr-1"></i><span id="logDetailTrigger"></span></span>
+                            </div>
+                            <pre id="logDetailContent" class="bg-gray-900 text-green-400 text-xs p-4 rounded-lg overflow-x-auto max-h-96 whitespace-pre-wrap font-mono"></pre>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Settings Modal -->
     <div id="settingsModal" class="fixed inset-0 z-50 hidden" role="dialog" aria-modal="true">
         <div class="fixed inset-0 bg-gray-900/60 backdrop-blur-sm transition-opacity opacity-0" id="settingsBackdrop"></div>
@@ -755,29 +1005,141 @@
             if (window._qrPollTimer) { clearInterval(window._qrPollTimer); window._qrPollTimer = null; }
         }
 
+        // 预定义配置项（required=true 为必填，false 为可选）
+        const PRESET_CONFIGS = [
+            { key: 'XIAOYA_URL', desc: '小雅 Alist 地址', placeholder: '如 http://127.0.0.1:5678', required: true },
+            { key: 'ADMIN_TOKEN', desc: '小雅管理员 Token', placeholder: '小雅后台管理密码', required: true },
+            { key: 'XIAOYA_EXTERNAL_URL', desc: '外部访问地址', placeholder: '如 http://your-ip:5666，通知链接用', required: true },
+            { key: 'ALIST_URL', desc: 'Alist 服务地址', placeholder: '如 http://127.0.0.1:5234', required: false },
+            { key: 'ALI_TARGET_FOLDER_ID', desc: '云盘默认目标文件夹 ID', placeholder: '阿里云盘文件夹 ID', required: false },
+            { key: 'HOST', desc: '监听地址', placeholder: '默认 0.0.0.0', required: false },
+            { key: 'PORT', desc: '监听端口', placeholder: '默认 5666', required: false },
+        ];
+
         async function loadConfigs() {
             try {
                 const res = await fetch('/api/config/list');
                 const data = await res.json();
                 const tbody = document.getElementById('configTableBody');
-                if (data.status === 'success' && data.configs.length > 0) {
-                    tbody.innerHTML = data.configs.map(c => `
-                        <tr class="hover:bg-gray-50">
-                            <td class="px-4 py-2 font-mono text-xs text-gray-700">${c.key}</td>
-                            <td class="px-4 py-2 text-xs text-gray-600 truncate max-w-xs" title="${c.value}">
-                                ${c.key.toLowerCase().includes('token') || c.key.toLowerCase().includes('password') ? '••••••' : c.value}
-                            </td>
-                            <td class="px-4 py-2">
-                                <button onclick="deleteConfigItem('${c.key}')" class="text-red-400 hover:text-red-600 text-xs"><i class="fas fa-trash"></i></button>
-                            </td>
-                        </tr>
-                    `).join('');
-                } else {
-                    tbody.innerHTML = '<tr><td colspan="3" class="px-4 py-8 text-center text-gray-400">暂无配置</td></tr>';
+                const existingMap = {};
+                if (data.status === 'success') {
+                    data.configs.forEach(c => { existingMap[c.key] = c.value; });
                 }
+
+                let html = '';
+                const renderedKeys = new Set();
+
+                // 1. 必填项
+                const requiredItems = PRESET_CONFIGS.filter(c => c.required);
+                requiredItems.forEach(rc => {
+                    html += _renderConfigRow(rc, existingMap[rc.key] || '', true);
+                    renderedKeys.add(rc.key);
+                });
+
+                // 2. 可选预设项
+                html += `<tr><td colspan="3" class="px-4 py-1 bg-gray-50"><span class="text-xs text-gray-400">可选配置</span></td></tr>`;
+                const optionalItems = PRESET_CONFIGS.filter(c => !c.required);
+                optionalItems.forEach(rc => {
+                    html += _renderConfigRow(rc, existingMap[rc.key] || '', false);
+                    renderedKeys.add(rc.key);
+                });
+
+                // 3. 数据库中存在但不在预设列表里的自定义配置
+                const customKeys = Object.keys(existingMap).filter(k => !renderedKeys.has(k) && k !== 'PUSHPLUS_TOKEN' && k !== 'PUSHPLUS_TOPIC');
+                if (customKeys.length > 0) {
+                    html += `<tr><td colspan="3" class="px-4 py-1 bg-gray-50"><span class="text-xs text-gray-400">自定义配置</span></td></tr>`;
+                    customKeys.forEach(key => {
+                        const val = existingMap[key];
+                        const isSensitive = key.toLowerCase().includes('token') || key.toLowerCase().includes('password');
+                        html += `
+                            <tr class="hover:bg-gray-50">
+                                <td class="px-4 py-2 font-mono text-xs text-gray-700">${key}</td>
+                                <td class="px-4 py-2 text-xs text-gray-600 truncate max-w-xs" title="${val}">
+                                    ${isSensitive ? '••••••' : val}
+                                </td>
+                                <td class="px-4 py-2">
+                                    <button onclick="deleteConfigItem('${key}')" class="text-red-400 hover:text-red-600 text-xs"><i class="fas fa-trash"></i></button>
+                                </td>
+                            </tr>`;
+                    });
+                }
+
+                tbody.innerHTML = html;
             } catch (e) {
                 console.error('Load configs error:', e);
             }
+        }
+
+        function _renderConfigRow(rc, val, isRequired) {
+            const isMissing = !val;
+            const isSensitive = rc.key.toLowerCase().includes('token') || rc.key.toLowerCase().includes('password');
+            const displayVal = val ? (isSensitive ? '••••••' : val) : '';
+            const rowBg = isRequired && isMissing ? 'bg-red-50/60' : (isMissing ? 'bg-amber-50/40' : 'hover:bg-gray-50');
+            const borderColor = isRequired && isMissing ? 'border-red-300' : 'border-gray-300';
+            const btnColor = isRequired && isMissing ? 'bg-red-500 hover:bg-red-600' : 'bg-purple-500 hover:bg-purple-600';
+            const tag = isRequired
+                ? `<span class="text-red-500 text-xs font-bold">*必填</span>`
+                : `<span class="text-gray-400 text-xs">选填</span>`;
+
+            return `
+                <tr class="${rowBg}" id="cfg-row-${rc.key}">
+                    <td class="px-4 py-2">
+                        <div class="flex items-center gap-1.5">
+                            <span class="font-mono text-xs text-gray-700">${rc.key}</span>
+                            ${tag}
+                        </div>
+                        <div class="text-xs text-gray-400 mt-0.5">${rc.desc}</div>
+                    </td>
+                    <td class="px-4 py-2" id="cfg-val-${rc.key}">
+                        ${isMissing
+                            ? `<div class="flex items-center gap-2">
+                                <input type="text" id="cfg-input-${rc.key}" placeholder="${rc.placeholder}"
+                                    class="flex-1 border ${borderColor} rounded px-2 py-1 text-xs focus:ring-2 focus:ring-purple-400 outline-none bg-white">
+                                <button onclick="saveRequiredConfig('${rc.key}')" class="px-2 py-1 ${btnColor} text-white rounded text-xs transition-colors whitespace-nowrap">
+                                    <i class="fas fa-save mr-0.5"></i>保存
+                                </button>
+                            </div>
+                            ${isRequired ? '<p class="text-xs text-red-400 mt-1"><i class="fas fa-exclamation-circle mr-0.5"></i>必填项，请填写后保存</p>' : '<p class="text-xs text-gray-400 mt-1">未配置，使用默认值</p>'}`
+                            : `<div class="flex items-center gap-2">
+                                <span class="text-xs text-gray-600 truncate max-w-[200px]" title="${val}">${displayVal}</span>
+                                <button onclick="editRequiredConfig('${rc.key}','${rc.placeholder}')" class="text-blue-400 hover:text-blue-600 text-xs"><i class="fas fa-edit"></i></button>
+                            </div>`
+                        }
+                    </td>
+                    <td class="px-4 py-2">
+                        ${!isMissing ? `<button onclick="deleteConfigItem('${rc.key}')" class="text-red-400 hover:text-red-600 text-xs"><i class="fas fa-trash"></i></button>` : ''}
+                    </td>
+                </tr>`;
+        }
+
+        async function saveRequiredConfig(key) {
+            const input = document.getElementById('cfg-input-' + key);
+            const val = input ? input.value.trim() : '';
+            if (!val) return alert('请填写该配置项');
+            try {
+                const res = await fetch('/api/config/set', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({key, value: val})
+                });
+                const data = await res.json();
+                if (data.status === 'success') loadConfigs();
+                else alert(data.message);
+            } catch (e) { alert('保存失败'); }
+        }
+
+        function editRequiredConfig(key, placeholder) {
+            const td = document.getElementById('cfg-val-' + key);
+            if (!td) return;
+            td.innerHTML = `
+                <div class="flex items-center gap-2">
+                    <input type="text" id="cfg-input-${key}" placeholder="${placeholder}"
+                        class="flex-1 border border-blue-300 rounded px-2 py-1 text-xs focus:ring-2 focus:ring-blue-400 outline-none bg-white">
+                    <button onclick="saveRequiredConfig('${key}')" class="px-2 py-1 bg-blue-500 text-white rounded text-xs hover:bg-blue-600 transition-colors whitespace-nowrap">
+                        <i class="fas fa-save mr-0.5"></i>保存
+                    </button>
+                    <button onclick="loadConfigs()" class="px-2 py-1 bg-gray-200 text-gray-600 rounded text-xs hover:bg-gray-300 transition-colors">取消</button>
+                </div>`;
+            document.getElementById('cfg-input-' + key).focus();
         }
 
         async function addConfig() {
@@ -944,6 +1306,7 @@
         }
 
         // Check if API returns need_login, show QR login prompt
+        let _needLoginPromptShown = false;
         const _origFetch = window.fetch;
         window.fetch = async function(...args) {
             const resp = await _origFetch.apply(this, args);
@@ -953,16 +1316,309 @@
                 const ct = resp.headers.get('content-type') || '';
                 if (ct.includes('application/json')) {
                     const body = await clone.json();
-                    if (body.need_login) {
+                    if (body.need_login && !_needLoginPromptShown) {
+                        _needLoginPromptShown = true;
                         if (confirm('阿里云盘登录已失效，是否立即扫码重新登录？')) {
                             openSettingsModal();
                             setTimeout(() => startQrLogin(), 500);
                         }
+                        setTimeout(() => { _needLoginPromptShown = false; }, 5000);
                     }
                 }
             } catch(e) {}
             return resp;
         };
+
+        // ========== Scheduler Modal ==========
+        function openSchedulerModal() {
+            const m = document.getElementById('schedulerModal');
+            m.classList.remove('hidden');
+            setTimeout(() => {
+                document.getElementById('schedulerBackdrop').classList.remove('opacity-0');
+                document.getElementById('schedulerPanel').classList.remove('opacity-0', 'translate-y-4');
+            }, 10);
+            showTaskList();
+        }
+        function closeSchedulerModal() {
+            document.getElementById('schedulerBackdrop').classList.add('opacity-0');
+            document.getElementById('schedulerPanel').classList.add('opacity-0', 'translate-y-4');
+            setTimeout(() => document.getElementById('schedulerModal').classList.add('hidden'), 300);
+        }
+
+        function showView(name) {
+            ['schViewList','schViewForm','schViewLogs','schViewLogDetail'].forEach(v =>
+                document.getElementById(v).classList.toggle('hidden', v !== name));
+        }
+
+        // --- Task List ---
+        async function showTaskList() {
+            showView('schViewList');
+            try {
+                const res = await fetch('/api/schedule/tasks');
+                const data = await res.json();
+                const el = document.getElementById('schTaskList');
+                const cnt = document.getElementById('schTaskCount');
+                const tasks = data.tasks || [];
+                cnt.textContent = `${tasks.length} 个任务`;
+                if (tasks.length === 0) {
+                    el.innerHTML = '<div class="text-center text-gray-400 py-12"><i class="fas fa-inbox text-3xl mb-2 block opacity-50"></i>暂无任务，点击右上角新建</div>';
+                    return;
+                }
+                el.innerHTML = tasks.map(t => {
+                    const statusColor = t.enabled ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500';
+                    const statusText = t.enabled ? '启用' : '停用';
+                    const nextRun = t.next_run ? `<span class="text-xs text-gray-400"><i class="fas fa-clock mr-0.5"></i>下次: ${t.next_run}</span>` : '';
+                    return `
+                    <div class="border rounded-xl p-4 hover:shadow-md transition-shadow bg-white">
+                        <div class="flex items-start justify-between gap-3">
+                            <div class="flex-1 min-w-0">
+                                <div class="flex items-center gap-2 mb-1">
+                                    <span class="font-semibold text-gray-800">${t.name}</span>
+                                    <span class="text-xs px-2 py-0.5 rounded-full ${statusColor}">${statusText}</span>
+                                </div>
+                                <div class="text-xs text-gray-500 space-y-0.5">
+                                    <div><i class="fas fa-folder text-yellow-500 mr-1 w-4"></i>${t.local_dir}</div>
+                                    <div><i class="fas fa-cloud text-blue-500 mr-1 w-4"></i>${t.remote_folder_name}</div>
+                                    <div><i class="fas fa-clock text-green-500 mr-1 w-4"></i><code class="bg-gray-100 px-1 rounded">${t.cron_expr}</code> ${nextRun}</div>
+                                </div>
+                            </div>
+                            <div class="flex items-center gap-1 flex-shrink-0">
+                                <button onclick="runTaskNow(${t.id})" title="立即执行" class="p-2 text-green-600 hover:bg-green-50 rounded-lg transition-colors"><i class="fas fa-play"></i></button>
+                                <button onclick="showLogs(${t.id})" title="查看日志" class="p-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"><i class="fas fa-list-alt"></i></button>
+                                <button onclick="editTask(${t.id})" title="编辑" class="p-2 text-gray-500 hover:bg-gray-100 rounded-lg transition-colors"><i class="fas fa-edit"></i></button>
+                                <button onclick="toggleTask(${t.id})" title="${t.enabled ? '停用' : '启用'}" class="p-2 ${t.enabled ? 'text-yellow-600 hover:bg-yellow-50' : 'text-green-600 hover:bg-green-50'} rounded-lg transition-colors"><i class="fas fa-${t.enabled ? 'pause' : 'play-circle'}"></i></button>
+                                <button onclick="deleteTask(${t.id})" title="删除" class="p-2 text-red-400 hover:bg-red-50 rounded-lg transition-colors"><i class="fas fa-trash"></i></button>
+                            </div>
+                        </div>
+                    </div>`;
+                }).join('');
+            } catch (e) {
+                document.getElementById('schTaskList').innerHTML = `<div class="text-red-500 text-center py-8">加载失败: ${e}</div>`;
+            }
+        }
+
+        // --- Task Form ---
+        function showTaskForm(taskData) {
+            showView('schViewForm');
+            document.getElementById('schFormTitle').textContent = taskData ? '编辑任务' : '新建任务';
+            document.getElementById('schEditId').value = taskData ? taskData.id : '';
+            document.getElementById('schName').value = taskData ? taskData.name : '';
+            document.getElementById('schLocalDir').value = taskData ? taskData.local_dir : '';
+            document.getElementById('schRemoteId').value = taskData ? taskData.remote_folder_id : 'root';
+            document.getElementById('schRemoteName').textContent = taskData ? taskData.remote_folder_name : '根目录';
+            document.getElementById('schCron').value = taskData ? taskData.cron_expr : '';
+            document.getElementById('localDirPicker').classList.add('hidden');
+            document.getElementById('remoteFolderPicker').classList.add('hidden');
+        }
+
+        async function editTask(id) {
+            const res = await fetch('/api/schedule/tasks');
+            const data = await res.json();
+            const task = (data.tasks || []).find(t => t.id === id);
+            if (task) showTaskForm(task);
+        }
+
+        function setCron(expr) { document.getElementById('schCron').value = expr; }
+
+        async function saveTask() {
+            const editId = document.getElementById('schEditId').value;
+            const payload = {
+                name: document.getElementById('schName').value.trim(),
+                local_dir: document.getElementById('schLocalDir').value.trim(),
+                remote_folder_id: document.getElementById('schRemoteId').value,
+                remote_folder_name: document.getElementById('schRemoteName').textContent.trim(),
+                cron_expr: document.getElementById('schCron').value.trim(),
+            };
+            if (!payload.name || !payload.local_dir || !payload.cron_expr) return alert('请填写所有必填项');
+            try {
+                const url = editId ? `/api/schedule/task/${editId}` : '/api/schedule/task';
+                const method = editId ? 'PUT' : 'POST';
+                const res = await fetch(url, { method, headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+                const data = await res.json();
+                if (data.status === 'success') { showTaskList(); }
+                else { alert(data.message); }
+            } catch (e) { alert('保存失败'); }
+        }
+
+        async function deleteTask(id) {
+            if (!confirm('确定删除该任务及其所有日志？')) return;
+            await fetch(`/api/schedule/task/${id}`, { method: 'DELETE' });
+            showTaskList();
+        }
+
+        async function toggleTask(id) {
+            await fetch(`/api/schedule/task/${id}/toggle`, { method: 'POST' });
+            showTaskList();
+        }
+
+        async function runTaskNow(id) {
+            const res = await fetch(`/api/schedule/task/${id}/run`, { method: 'POST' });
+            const data = await res.json();
+            alert(data.message);
+        }
+
+        // --- Local Dir Picker ---
+        let _localDirParent = null;
+        function openLocalDirPicker() {
+            document.getElementById('localDirPicker').classList.toggle('hidden');
+            const cur = document.getElementById('schLocalDir').value.trim() || '/';
+            loadLocalDirs(cur);
+        }
+        async function loadLocalDirs(path) {
+            const el = document.getElementById('localDirEntries');
+            el.innerHTML = '<div class="text-xs text-gray-400"><i class="fas fa-spinner fa-spin"></i> 加载中...</div>';
+            try {
+                const res = await fetch('/api/schedule/local_dirs', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({path}) });
+                const data = await res.json();
+                if (data.status !== 'success') { el.innerHTML = `<div class="text-xs text-red-500">${data.message}</div>`; return; }
+                document.getElementById('localDirCurrent').textContent = data.path;
+                _localDirParent = data.parent;
+                if (data.dirs.length === 0) {
+                    el.innerHTML = '<div class="text-xs text-gray-400">无子目录</div>';
+                } else {
+                    el.innerHTML = data.dirs.map(d => {
+                        const pathJson = JSON.stringify(d.path);
+                        return `
+                        <div class="flex items-center gap-2 px-2 py-1 rounded hover:bg-white cursor-pointer text-xs" onclick='loadLocalDirs(${pathJson})'>
+                            <i class="fas fa-folder text-yellow-400"></i>
+                            <span class="flex-1 truncate">${d.name}</span>
+                            <button onclick="event.stopPropagation();selectLocalDir(${pathJson})" class="text-green-600 hover:underline text-xs">选择</button>
+                        </div>`;
+                    }).join('');
+                }
+                // Also allow selecting the current dir
+                const curPathJson = JSON.stringify(data.path);
+                el.innerHTML += `<div class="mt-2 border-t pt-2"><button onclick='selectLocalDir(${curPathJson})' class="w-full py-1.5 bg-green-600 text-white rounded text-xs hover:bg-green-700">选择当前目录: ${data.path}</button></div>`;
+            } catch(e) { el.innerHTML = `<div class="text-xs text-red-500">加载失败</div>`; }
+        }
+        function localDirNav(dir) {
+            if (dir === '..' && _localDirParent) loadLocalDirs(_localDirParent);
+        }
+        function selectLocalDir(path) {
+            document.getElementById('schLocalDir').value = path;
+            document.getElementById('localDirPicker').classList.add('hidden');
+        }
+
+        // --- Remote Folder Picker ---
+        let _remotePickerHistory = [];
+        let _remotePickerCurrentId = 'root';
+        let _remotePickerCurrentName = '根目录';
+
+        function openRemoteFolderPicker() {
+            document.getElementById('remoteFolderPicker').classList.toggle('hidden');
+            _remotePickerHistory = [];
+            remoteNav('root');
+        }
+        async function remoteNav(folderId, folderName) {
+            const el = document.getElementById('remoteEntries');
+            el.innerHTML = '<div class="text-xs text-gray-400"><i class="fas fa-spinner fa-spin"></i> 加载中...</div>';
+            try {
+                const res = await fetch('/api/aliyun/files', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({parent_file_id:folderId}) });
+                const data = await res.json();
+                if (data.status !== 'success') { el.innerHTML = `<div class="text-xs text-red-500">${data.message}</div>`; return; }
+
+                if (folderId !== _remotePickerCurrentId && folderId !== 'root') {
+                    _remotePickerHistory.push({id: _remotePickerCurrentId, name: _remotePickerCurrentName});
+                } else if (folderId === 'root') {
+                    _remotePickerHistory = [];
+                }
+                _remotePickerCurrentId = folderId;
+                _remotePickerCurrentName = folderName || (data.current_folder ? data.current_folder.name : '根目录');
+
+                document.getElementById('remoteCurrentPath').textContent = _remotePickerCurrentName;
+                document.getElementById('remoteUpBtn').classList.toggle('hidden', _remotePickerHistory.length === 0);
+
+                const folders = (data.files || []).filter(f => f.type === 'folder');
+                if (folders.length === 0) {
+                    el.innerHTML = '<div class="text-xs text-gray-400">无子文件夹</div>';
+                } else {
+                    el.innerHTML = folders.map(f => `
+                        <div class="flex items-center gap-2 px-2 py-1 rounded hover:bg-white cursor-pointer text-xs" onclick="remoteNav('${f.file_id}','${f.name.replace(/'/g,"\\'")}')">
+                            <i class="fas fa-folder text-yellow-400"></i>
+                            <span class="flex-1 truncate">${f.name}</span>
+                        </div>
+                    `).join('');
+                }
+            } catch(e) { el.innerHTML = `<div class="text-xs text-red-500">加载失败</div>`; }
+        }
+        function remoteNavUp() {
+            if (_remotePickerHistory.length > 0) {
+                const prev = _remotePickerHistory.pop();
+                _remotePickerCurrentId = prev.id;
+                _remotePickerCurrentName = prev.name;
+                remoteNav(prev.id, prev.name);
+                // pop again because remoteNav will push
+                _remotePickerHistory.pop();
+            }
+        }
+        function confirmRemoteFolder() {
+            document.getElementById('schRemoteId').value = _remotePickerCurrentId;
+            document.getElementById('schRemoteName').textContent = _remotePickerCurrentName;
+            document.getElementById('remoteFolderPicker').classList.add('hidden');
+        }
+
+        // --- Logs ---
+        async function showLogs(taskId) {
+            window._currentLogTaskId = taskId;
+            showView('schViewLogs');
+            const el = document.getElementById('schLogList');
+            el.innerHTML = '<div class="text-center text-gray-400 py-8"><i class="fas fa-spinner fa-spin"></i> 加载中...</div>';
+            try {
+                // Get task name
+                const tRes = await fetch('/api/schedule/tasks');
+                const tData = await tRes.json();
+                const task = (tData.tasks || []).find(t => t.id === taskId);
+                document.getElementById('schLogsTitle').textContent = task ? `日志 - ${task.name}` : '执行日志';
+
+                const res = await fetch(`/api/schedule/task/${taskId}/logs`);
+                const data = await res.json();
+                const logs = data.logs || [];
+                if (logs.length === 0) {
+                    el.innerHTML = '<div class="text-center text-gray-400 py-8">暂无执行记录</div>';
+                    return;
+                }
+                el.innerHTML = logs.map(l => {
+                    let sc, st;
+                    if (l.status === 'running') { sc = 'bg-blue-100 text-blue-700'; st = '执行中'; }
+                    else if (l.status === 'success') { sc = 'bg-green-100 text-green-700'; st = '成功'; }
+                    else if (l.status === 'partial') { sc = 'bg-yellow-100 text-yellow-700'; st = '部分成功'; }
+                    else { sc = 'bg-red-100 text-red-700'; st = '失败'; }
+                    const trigger = l.trigger_type === 'manual' ? '手动' : '定时';
+                    return `
+                    <div class="border rounded-lg p-3 hover:shadow-sm cursor-pointer transition-shadow bg-white" onclick="showLogDetail(${l.id})">
+                        <div class="flex items-center justify-between">
+                            <div class="flex items-center gap-2">
+                                <span class="text-xs px-2 py-0.5 rounded-full ${sc}">${st}</span>
+                                <span class="text-xs px-1.5 py-0.5 rounded bg-gray-100 text-gray-500">${trigger}</span>
+                                <span class="text-xs text-gray-600 truncate max-w-xs">${l.message || ''}</span>
+                            </div>
+                            <span class="text-xs text-gray-400">${l.started_at || ''}</span>
+                        </div>
+                    </div>`;
+                }).join('');
+            } catch(e) { el.innerHTML = `<div class="text-red-500 text-center py-4">${e}</div>`; }
+        }
+
+        async function showLogDetail(logId) {
+            showView('schViewLogDetail');
+            document.getElementById('logDetailContent').textContent = '加载中...';
+            try {
+                const res = await fetch(`/api/schedule/log/${logId}`);
+                const data = await res.json();
+                const l = data.log;
+                let sc, st;
+                if (l.status === 'running') { sc = 'bg-blue-100 text-blue-700'; st = '执行中'; }
+                else if (l.status === 'success') { sc = 'bg-green-100 text-green-700'; st = '成功'; }
+                else if (l.status === 'partial') { sc = 'bg-yellow-100 text-yellow-700'; st = '部分成功'; }
+                else { sc = 'bg-red-100 text-red-700'; st = '失败'; }
+                document.getElementById('logDetailStatus').className = `text-xs px-2 py-0.5 rounded-full ${sc}`;
+                document.getElementById('logDetailStatus').textContent = st;
+                document.getElementById('logDetailStart').textContent = l.started_at || '-';
+                document.getElementById('logDetailEnd').textContent = l.finished_at || '-';
+                document.getElementById('logDetailTrigger').textContent = l.trigger_type === 'manual' ? '手动触发' : '定时触发';
+                document.getElementById('logDetailContent').textContent = l.detail || '（无详细日志）';
+            } catch(e) { document.getElementById('logDetailContent').textContent = `加载失败: ${e}`; }
+        }
     </script>
 </body>
 </html>

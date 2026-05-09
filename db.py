@@ -33,6 +33,28 @@ def init_db():
             token_data TEXT,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS schedule_task (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            local_dir TEXT NOT NULL,
+            remote_folder_id TEXT NOT NULL DEFAULT 'root',
+            remote_folder_name TEXT DEFAULT '根目录',
+            cron_expr TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS schedule_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER NOT NULL,
+            trigger_type TEXT NOT NULL DEFAULT 'cron',
+            status TEXT NOT NULL DEFAULT 'running',
+            message TEXT DEFAULT '',
+            detail TEXT DEFAULT '',
+            started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            finished_at TIMESTAMP,
+            FOREIGN KEY (task_id) REFERENCES schedule_task(id) ON DELETE CASCADE
+        );
     """)
     conn.commit()
 
@@ -117,3 +139,107 @@ def sync_env_to_db():
             existing = get_config(key)
             if existing is None:
                 set_config(key, val, desc)
+
+
+# ==================== 调度任务 CRUD ====================
+
+def create_schedule_task(name, local_dir, remote_folder_id, remote_folder_name, cron_expr):
+    conn = get_conn()
+    cur = conn.execute(
+        "INSERT INTO schedule_task (name, local_dir, remote_folder_id, remote_folder_name, cron_expr) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (name, local_dir, remote_folder_id, remote_folder_name, cron_expr)
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def update_schedule_task(task_id, name, local_dir, remote_folder_id, remote_folder_name, cron_expr, enabled):
+    conn = get_conn()
+    conn.execute(
+        "UPDATE schedule_task SET name=?, local_dir=?, remote_folder_id=?, remote_folder_name=?, "
+        "cron_expr=?, enabled=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+        (name, local_dir, remote_folder_id, remote_folder_name, cron_expr, enabled, task_id)
+    )
+    conn.commit()
+
+
+def delete_schedule_task(task_id):
+    conn = get_conn()
+    conn.execute("DELETE FROM schedule_log WHERE task_id=?", (task_id,))
+    conn.execute("DELETE FROM schedule_task WHERE id=?", (task_id,))
+    conn.commit()
+
+
+def get_all_schedule_tasks():
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT id, name, local_dir, remote_folder_id, remote_folder_name, cron_expr, enabled, created_at, updated_at "
+        "FROM schedule_task ORDER BY id"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_schedule_task(task_id):
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT id, name, local_dir, remote_folder_id, remote_folder_name, cron_expr, enabled, created_at, updated_at "
+        "FROM schedule_task WHERE id=?", (task_id,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def toggle_schedule_task(task_id, enabled):
+    conn = get_conn()
+    conn.execute("UPDATE schedule_task SET enabled=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (enabled, task_id))
+    conn.commit()
+
+
+# ==================== 调度日志 ====================
+
+def create_schedule_log(task_id, trigger_type='cron'):
+    conn = get_conn()
+    cur = conn.execute(
+        "INSERT INTO schedule_log (task_id, trigger_type, status) VALUES (?, ?, 'running')",
+        (task_id, trigger_type)
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def update_schedule_log(log_id, status, message='', detail=''):
+    conn = get_conn()
+    conn.execute(
+        "UPDATE schedule_log SET status=?, message=?, detail=?, finished_at=CURRENT_TIMESTAMP WHERE id=?",
+        (status, message, detail, log_id)
+    )
+    conn.commit()
+
+
+def append_schedule_log_detail(log_id, line):
+    """追加日志详情"""
+    conn = get_conn()
+    conn.execute(
+        "UPDATE schedule_log SET detail = COALESCE(detail, '') || ? WHERE id=?",
+        (line + '\n', log_id)
+    )
+    conn.commit()
+
+
+def get_schedule_logs(task_id, limit=50):
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT id, task_id, trigger_type, status, message, started_at, finished_at "
+        "FROM schedule_log WHERE task_id=? ORDER BY id DESC LIMIT ?",
+        (task_id, limit)
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_schedule_log_detail(log_id):
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT id, task_id, trigger_type, status, message, detail, started_at, finished_at "
+        "FROM schedule_log WHERE id=?", (log_id,)
+    ).fetchone()
+    return dict(row) if row else None
