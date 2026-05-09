@@ -5,3 +5,4 @@ beautifulsoup4
 aligo
 qrcode
 apscheduler
+pysqlite3-binary
