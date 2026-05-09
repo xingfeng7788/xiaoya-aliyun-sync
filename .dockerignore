@@ -5,9 +5,17 @@ __pycache__
 .Python
 env/
 venv/
+.venv/
 .env
 .idea/
 .git/
+.gitignore
+*.db
+data/
+downloads/
+temp_uploads/
+README.md
+LICENSE
 .gitignore
 docker-compose.yaml
 README.md

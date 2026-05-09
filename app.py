@@ -5,11 +5,13 @@ import time
 import base64
 import traceback
 import uuid
+import secrets
 import _thread
 
 import requests
 import qrcode
-from flask import Flask, render_template, request, jsonify, Response, stream_with_context
+from flask import Flask, render_template, request, jsonify, Response, stream_with_context, session, redirect, url_for
+from functools import wraps
 from dotenv import load_dotenv
 from urllib.parse import unquote
 from bs4 import BeautifulSoup
@@ -28,12 +30,15 @@ from db import (
     get_all_schedule_tasks, get_schedule_task, toggle_schedule_task,
     create_schedule_log, update_schedule_log, append_schedule_log_detail,
     get_schedule_logs, get_schedule_log_detail,
+    verify_user, change_user_password,
 )
 
 # 加载 .env 文件
 load_dotenv()
 
 app = Flask(__name__)
+app.secret_key = os.getenv('SECRET_KEY', '') or secrets.token_hex(32)
+app.permanent_session_lifetime = __import__('datetime').timedelta(days=7)
 
 # 初始化数据库并同步环境变量
 init_db()
@@ -45,6 +50,90 @@ def cfg(key, default=""):
 
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", 5000))
+
+
+# ==================== 用户认证 ====================
+
+def login_required(f):
+    """登录验证装饰器"""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not session.get('user_id'):
+            if request.is_json or request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+                return jsonify({"status": "error", "message": "未登录", "need_auth": True}), 401
+            return redirect(url_for('login_page'))
+        return f(*args, **kwargs)
+    return decorated
+
+
+@app.route('/login', methods=['GET'])
+def login_page():
+    if session.get('user_id'):
+        return redirect(url_for('index'))
+    return render_template('login.html')
+
+
+@app.route('/api/auth/login', methods=['POST'])
+def auth_login():
+    username = (request.json.get('username') or '').strip()
+    password = request.json.get('password') or ''
+    if not username or not password:
+        return jsonify({"status": "error", "message": "用户名和密码不能为空"})
+
+    user = verify_user(username, password)
+    if not user:
+        # 防止时序攻击：固定延迟
+        time.sleep(0.5)
+        return jsonify({"status": "error", "message": "用户名或密码错误"})
+
+    session.permanent = True
+    session['user_id'] = user['id']
+    session['username'] = user['username']
+    return jsonify({"status": "success", "message": "登录成功"})
+
+
+@app.route('/api/auth/logout', methods=['POST'])
+def auth_logout():
+    session.clear()
+    return jsonify({"status": "success", "message": "已退出登录"})
+
+
+@app.route('/api/auth/change_password', methods=['POST'])
+@login_required
+def auth_change_password():
+    old_password = request.json.get('old_password') or ''
+    new_password = request.json.get('new_password') or ''
+    if not old_password or not new_password:
+        return jsonify({"status": "error", "message": "旧密码和新密码不能为空"})
+    if len(new_password) < 6:
+        return jsonify({"status": "error", "message": "新密码长度不能少于6位"})
+
+    user = verify_user(session['username'], old_password)
+    if not user:
+        return jsonify({"status": "error", "message": "旧密码错误"})
+
+    change_user_password(session['user_id'], new_password)
+    return jsonify({"status": "success", "message": "密码修改成功"})
+
+
+@app.route('/api/auth/status', methods=['GET'])
+def auth_status():
+    if session.get('user_id'):
+        return jsonify({"status": "success", "logged_in": True, "username": session.get('username')})
+    return jsonify({"status": "success", "logged_in": False})
+
+
+# 全局认证拦截：除登录页和认证接口外，所有请求需登录
+@app.before_request
+def check_auth():
+    # 不需要认证的路径
+    public_paths = ('/login', '/api/auth/', '/static/')
+    if any(request.path.startswith(p) for p in public_paths):
+        return None
+    if not session.get('user_id'):
+        if request.is_json or request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+            return jsonify({"status": "error", "message": "未登录", "need_auth": True}), 401
+        return redirect(url_for('login_page'))
 
 # 全局初始化 Aligo 实例
 _ali_instance = None

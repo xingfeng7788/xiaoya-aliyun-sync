@@ -2,6 +2,8 @@
 import sqlite3
 import os
 import json
+import hashlib
+import secrets
 import threading
 
 DB_PATH = os.getenv("DB_PATH", "xiaoya.db")
@@ -55,8 +57,18 @@ def init_db():
             finished_at TIMESTAMP,
             FOREIGN KEY (task_id) REFERENCES schedule_task(id) ON DELETE CASCADE
         );
+        CREATE TABLE IF NOT EXISTS user (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            salt TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
     """)
     conn.commit()
+    # 如果无用户则创建默认 admin
+    _ensure_default_user(conn)
 
 
 def get_config(key, default=None):
@@ -241,3 +253,53 @@ def get_schedule_log_detail(log_id):
         "FROM schedule_log WHERE id=?", (log_id,)
     ).fetchone()
     return dict(row) if row else None
+
+
+# ==================== 用户管理 ====================
+
+def _hash_password(password, salt):
+    """使用 PBKDF2 + SHA256 哈希密码"""
+    return hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt.encode('utf-8'), 100000).hex()
+
+
+def _ensure_default_user(conn):
+    """无用户时创建默认 admin 账户"""
+    row = conn.execute("SELECT COUNT(*) as cnt FROM user").fetchone()
+    if row['cnt'] == 0:
+        default_password = secrets.token_urlsafe(12)
+        salt = secrets.token_hex(16)
+        password_hash = _hash_password(default_password, salt)
+        conn.execute(
+            "INSERT INTO user (username, password_hash, salt) VALUES (?, ?, ?)",
+            ('admin', password_hash, salt)
+        )
+        conn.commit()
+        print("=" * 50)
+        print(f"  默认管理员账户已创建")
+        print(f"  用户名: admin")
+        print(f"  密码: {default_password}")
+        print(f"  请登录后立即修改密码！")
+        print("=" * 50)
+
+
+def verify_user(username, password):
+    """验证用户密码，返回用户 dict 或 None"""
+    conn = get_conn()
+    row = conn.execute("SELECT id, username, password_hash, salt FROM user WHERE username = ?", (username,)).fetchone()
+    if not row:
+        return None
+    if _hash_password(password, row['salt']) == row['password_hash']:
+        return {'id': row['id'], 'username': row['username']}
+    return None
+
+
+def change_user_password(user_id, new_password):
+    """修改用户密码"""
+    conn = get_conn()
+    salt = secrets.token_hex(16)
+    password_hash = _hash_password(new_password, salt)
+    conn.execute(
+        "UPDATE user SET password_hash=?, salt=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+        (password_hash, salt, user_id)
+    )
+    conn.commit()

@@ -49,6 +49,24 @@
                         </div>
                         <span class="text-sm font-medium">阿里云盘管理</span>
                     </button>
+
+                    <!-- 用户菜单 -->
+                    <div class="relative" id="userMenuWrapper">
+                        <button onclick="toggleUserMenu()" class="flex items-center gap-1.5 bg-white border border-gray-200 text-gray-600 px-3 py-2 rounded-full hover:border-gray-400 hover:shadow-md transition-all duration-300">
+                            <i class="fas fa-user-circle text-lg text-gray-400"></i>
+                            <span class="text-sm font-medium" id="navUsername">用户</span>
+                            <i class="fas fa-chevron-down text-xs text-gray-400"></i>
+                        </button>
+                        <div id="userDropdown" class="hidden absolute right-0 mt-2 w-48 bg-white rounded-xl shadow-xl border border-gray-100 py-1 z-50">
+                            <button onclick="openChangePasswordModal()" class="w-full text-left px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50 flex items-center gap-2">
+                                <i class="fas fa-key text-gray-400"></i>修改密码
+                            </button>
+                            <hr class="my-1 border-gray-100">
+                            <button onclick="doLogout()" class="w-full text-left px-4 py-2.5 text-sm text-red-600 hover:bg-red-50 flex items-center gap-2">
+                                <i class="fas fa-sign-out-alt text-red-400"></i>退出登录
+                            </button>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -1371,11 +1389,19 @@
             }, 2000);
         }
 
-        // Check if API returns need_login, show QR login prompt
+        // Check if API returns need_login, show QR login prompt; also handle auth redirect
         let _needLoginPromptShown = false;
         const _origFetch = window.fetch;
         window.fetch = async function(...args) {
             const resp = await _origFetch.apply(this, args);
+            // 401 未登录 → 跳转登录页
+            if (resp.status === 401) {
+                try {
+                    const c = resp.clone();
+                    const b = await c.json();
+                    if (b.need_auth) { window.location.href = '/login'; return resp; }
+                } catch(e) {}
+            }
             // Clone to allow reading body twice
             const clone = resp.clone();
             try {
@@ -1685,6 +1711,108 @@
                 document.getElementById('logDetailContent').textContent = l.detail || '（无详细日志）';
             } catch(e) { document.getElementById('logDetailContent').textContent = `加载失败: ${e}`; }
         }
+
+        // ========== 用户菜单 ==========
+        function toggleUserMenu() {
+            document.getElementById('userDropdown').classList.toggle('hidden');
+        }
+        // 点击其他地方关闭菜单
+        document.addEventListener('click', (e) => {
+            const wrapper = document.getElementById('userMenuWrapper');
+            if (wrapper && !wrapper.contains(e.target)) {
+                document.getElementById('userDropdown').classList.add('hidden');
+            }
+        });
+
+        // 加载用户名
+        fetch('/api/auth/status').then(r => r.json()).then(d => {
+            if (d.logged_in) document.getElementById('navUsername').textContent = d.username;
+        }).catch(() => {});
+
+        async function doLogout() {
+            if (!confirm('确定要退出登录吗？')) return;
+            await fetch('/api/auth/logout', { method: 'POST' });
+            window.location.href = '/login';
+        }
+
+        function openChangePasswordModal() {
+            document.getElementById('userDropdown').classList.add('hidden');
+            document.getElementById('changePwdModal').classList.remove('hidden');
+            document.getElementById('oldPassword').value = '';
+            document.getElementById('newPassword').value = '';
+            document.getElementById('confirmPassword').value = '';
+            document.getElementById('changePwdError').classList.add('hidden');
+        }
+        function closeChangePasswordModal() {
+            document.getElementById('changePwdModal').classList.add('hidden');
+        }
+
+        async function doChangePassword() {
+            const oldPwd = document.getElementById('oldPassword').value;
+            const newPwd = document.getElementById('newPassword').value;
+            const confirmPwd = document.getElementById('confirmPassword').value;
+            const errEl = document.getElementById('changePwdError');
+            const errMsg = document.getElementById('changePwdErrorMsg');
+
+            if (!oldPwd || !newPwd) { errMsg.textContent = '请填写所有字段'; errEl.classList.remove('hidden'); return; }
+            if (newPwd.length < 6) { errMsg.textContent = '新密码长度不能少于6位'; errEl.classList.remove('hidden'); return; }
+            if (newPwd !== confirmPwd) { errMsg.textContent = '两次输入的新密码不一致'; errEl.classList.remove('hidden'); return; }
+
+            try {
+                const res = await fetch('/api/auth/change_password', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ old_password: oldPwd, new_password: newPwd })
+                });
+                const data = await res.json();
+                if (data.status === 'success') {
+                    alert('密码修改成功');
+                    closeChangePasswordModal();
+                } else {
+                    errMsg.textContent = data.message;
+                    errEl.classList.remove('hidden');
+                }
+            } catch(e) {
+                errMsg.textContent = '请求失败';
+                errEl.classList.remove('hidden');
+            }
+        }
     </script>
+
+    <!-- 修改密码弹窗 -->
+    <div id="changePwdModal" class="fixed inset-0 z-[70] hidden flex items-center justify-center">
+        <div class="fixed inset-0 bg-gray-900/60 backdrop-blur-sm" onclick="closeChangePasswordModal()"></div>
+        <div class="relative z-10 bg-white rounded-2xl shadow-2xl w-full max-w-md p-6">
+            <div class="flex items-center justify-between mb-6">
+                <h3 class="text-lg font-bold text-gray-900"><i class="fas fa-key text-purple-500 mr-2"></i>修改密码</h3>
+                <button onclick="closeChangePasswordModal()" class="text-gray-400 hover:text-gray-600"><i class="fas fa-times text-xl"></i></button>
+            </div>
+            <div class="space-y-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">当前密码</label>
+                    <input type="password" id="oldPassword" autocomplete="current-password"
+                        class="w-full border border-gray-300 rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-purple-500 outline-none">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">新密码</label>
+                    <input type="password" id="newPassword" autocomplete="new-password"
+                        class="w-full border border-gray-300 rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-purple-500 outline-none"
+                        placeholder="至少6位">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">确认新密码</label>
+                    <input type="password" id="confirmPassword" autocomplete="new-password"
+                        class="w-full border border-gray-300 rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-purple-500 outline-none">
+                </div>
+                <div id="changePwdError" class="hidden p-3 bg-red-50 border border-red-200 rounded-xl text-sm text-red-600">
+                    <i class="fas fa-exclamation-circle mr-1"></i><span id="changePwdErrorMsg"></span>
+                </div>
+                <button onclick="doChangePassword()"
+                    class="w-full bg-gradient-to-r from-blue-600 to-purple-600 text-white py-2.5 rounded-xl font-medium hover:from-blue-700 hover:to-purple-700 transition-all">
+                    <i class="fas fa-check mr-1"></i>确认修改
+                </button>
+            </div>
+        </div>
+    </div>
 </body>
 </html>
