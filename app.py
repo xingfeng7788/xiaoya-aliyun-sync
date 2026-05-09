@@ -1,47 +1,186 @@
 import os
+import io
 import json
+import time
+import base64
 import traceback
+import uuid
+import _thread
 
 import requests
+import qrcode
 from flask import Flask, render_template, request, jsonify, Response, stream_with_context
 from dotenv import load_dotenv
 from urllib.parse import unquote
 from bs4 import BeautifulSoup
 from aligo import Aligo
+from aligo.core.Config import (
+    AUTH_HOST, PASSPORT_HOST, API_HOST,
+    V2_OAUTH_AUTHORIZE, NEWLOGIN_QRCODE_GENERATE_DO,
+    NEWLOGIN_QRCODE_QUERY_DO, V2_ACCOUNT_TOKEN,
+    CLIENT_ID, UNI_PARAMS, UNI_HEADERS
+)
+
+from db import (
+    init_db, get_config, set_config, delete_config,
+    get_all_configs, save_ali_token, get_ali_token, sync_env_to_db
+)
 
 # 加载 .env 文件
 load_dotenv()
 
 app = Flask(__name__)
 
-# --- 基础配置 ---
-ALIST_URL = os.getenv("ALIST_URL", "http://localhost:5234")
-XIAOYA_URL = os.getenv("XIAOYA_URL", "http://localhost:5678")
-ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
+# 初始化数据库并同步环境变量
+init_db()
+sync_env_to_db()
+
+# --- 基础配置 (优先从数据库读取，否则从环境变量) ---
+def cfg(key, default=""):
+    return get_config(key) or os.getenv(key, default)
+
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", 5000))
 
-# --- 阿里云盘配置 (aligo 模式) ---
-# 请在 .env 中设置 ALI_REFRESH_TOKEN
-ALI_REFRESH_TOKEN = os.getenv("ALI_REFRESH_TOKEN", "")
-# 目标文件夹 ID，默认为根目录
-ALI_TARGET_FOLDER_ID = os.getenv("ALI_TARGET_FOLDER_ID", "root")
-# 下载目录，默认为 /downloads (对应 docker-compose 中的挂载)
-ALI_DOWNLOAD_PATH = os.getenv("ALI_DOWNLOAD_PATH", "/downloads")
-
 # 全局初始化 Aligo 实例
-# 注意：第一次启动时，如果没有 refresh_token，aligo 可能会在控制台打印二维码
 _ali_instance = None
 
+# QR 码登录状态
+_qr_login_state = {
+    'active': False,
+    'qr_image_b64': None,
+    'status': 'idle',  # idle, waiting, scanned, confirmed, expired, error
+    'message': '',
+}
 
-def get_ali():
+
+def _get_refresh_token():
+    """优先从数据库获取 refresh_token，其次从环境变量"""
+    token_info = get_ali_token()
+    if token_info and token_info.get('refresh_token'):
+        return token_info['refresh_token']
+    return cfg('ALI_REFRESH_TOKEN', '')
+
+
+def get_ali(force_new=False):
     global _ali_instance
-    if _ali_instance is None:
-        if not ALI_REFRESH_TOKEN:
-            print("警告: 未设置 ALI_REFRESH_TOKEN，Aligo 将进入扫码模式")
-        # Enable aria2 for faster downloads
-        _ali_instance = Aligo(refresh_token=ALI_REFRESH_TOKEN, use_aria2=True)
+    if _ali_instance is None or force_new:
+        refresh_token = _get_refresh_token()
+        if not refresh_token:
+            raise Exception("未配置阿里云盘 Token，请先通过页面扫码登录或在配置管理中设置 ALI_REFRESH_TOKEN")
+        _ali_instance = Aligo(refresh_token=refresh_token, re_login=False, use_aria2=True)
+        # 登录成功后，保存 token 到数据库
+        if _ali_instance.token:
+            save_ali_token(
+                refresh_token=_ali_instance.token.refresh_token,
+                access_token=_ali_instance.token.access_token,
+                token_data=_ali_instance.token.to_dict() if hasattr(_ali_instance.token, 'to_dict') else None
+            )
     return _ali_instance
+
+
+def _start_qr_login():
+    """启动二维码登录流程（后台线程调用）"""
+    global _qr_login_state, _ali_instance
+    try:
+        _qr_login_state['active'] = True
+        _qr_login_state['status'] = 'waiting'
+        _qr_login_state['message'] = '请使用阿里云盘 APP 扫描二维码'
+
+        session = requests.session()
+        session.trust_env = False
+        session.headers.update(UNI_HEADERS)
+
+        # 1. 获取 session
+        session.get(AUTH_HOST + V2_OAUTH_AUTHORIZE, params={
+            'login_type': 'custom',
+            'response_type': 'code',
+            'redirect_uri': 'https://www.aliyundrive.com/sign/callback',
+            'client_id': CLIENT_ID,
+            'state': r'{"origin":"file://"}',
+        }, stream=True, timeout=30).close()
+
+        # 2. 生成二维码
+        response = session.get(
+            PASSPORT_HOST + NEWLOGIN_QRCODE_GENERATE_DO, params=UNI_PARAMS,
+            timeout=30
+        )
+        data = response.json()['content']['data']
+        qr_link = data['codeContent']
+
+        # 3. 生成二维码图片 base64
+        qr_img = qrcode.make(qr_link)
+        buf = io.BytesIO()
+        qr_img.save(buf, format='PNG')
+        _qr_login_state['qr_image_b64'] = base64.b64encode(buf.getvalue()).decode('utf-8')
+
+        # 4. 轮询扫码状态
+        timeout_at = time.time() + 120  # 2分钟超时
+        while time.time() < timeout_at:
+            response = session.post(
+                PASSPORT_HOST + NEWLOGIN_QRCODE_QUERY_DO,
+                data=data, params=UNI_PARAMS, timeout=30
+            )
+            login_data = response.json()['content']['data']
+            qr_status = login_data['qrCodeStatus']
+
+            if qr_status == 'NEW':
+                pass
+            elif qr_status == 'SCANED':
+                _qr_login_state['status'] = 'scanned'
+                _qr_login_state['message'] = '已扫描，等待确认...'
+            elif qr_status == 'CONFIRMED':
+                _qr_login_state['status'] = 'confirmed'
+                _qr_login_state['message'] = '登录成功，正在初始化...'
+
+                # 解析 token
+                biz_ext = response.json()['content']['data']['bizExt']
+                biz_ext = base64.b64decode(biz_ext).decode('gb18030')
+                refresh_token = json.loads(biz_ext)['pds_login_result']['refreshToken']
+
+                # 用 refresh_token 换取完整 token
+                token_resp = session.post(
+                    API_HOST + V2_ACCOUNT_TOKEN,
+                    json={'refresh_token': refresh_token, 'grant_type': 'refresh_token'},
+                    timeout=30
+                )
+                if token_resp.status_code == 200:
+                    token_data = token_resp.json()
+                    save_ali_token(
+                        refresh_token=token_data.get('refresh_token', refresh_token),
+                        access_token=token_data.get('access_token', ''),
+                        token_data=token_data
+                    )
+                    # 重新初始化 Aligo 实例
+                    _ali_instance = None
+                    _qr_login_state['status'] = 'confirmed'
+                    _qr_login_state['message'] = '登录成功！'
+                else:
+                    save_ali_token(refresh_token=refresh_token)
+                    _ali_instance = None
+                    _qr_login_state['status'] = 'confirmed'
+                    _qr_login_state['message'] = '登录成功！'
+                return
+            else:
+                _qr_login_state['status'] = 'expired'
+                _qr_login_state['message'] = '二维码已过期，请重新获取'
+                return
+            time.sleep(3)
+
+        _qr_login_state['status'] = 'expired'
+        _qr_login_state['message'] = '二维码已超时，请重新获取'
+    except Exception as e:
+        traceback.print_exc()
+        _qr_login_state['status'] = 'error'
+        _qr_login_state['message'] = f'登录出错: {str(e)}'
+    finally:
+        _qr_login_state['active'] = False
+
+
+def _is_auth_error(e):
+    """判断是否为认证相关错误"""
+    msg = str(e).lower()
+    return any(kw in msg for kw in ['refreshfailed', 'token', 'unauthorized', '401', 'invalidtoken', 'expired'])
 
 
 @app.route('/api/aliyun/files', methods=['POST'])
@@ -86,7 +225,10 @@ def aliyun_files():
         })
     except Exception as e:
         traceback.print_exc()
-        return jsonify({"status": "error", "message": str(e)})
+        error_resp = {"status": "error", "message": str(e)}
+        if _is_auth_error(e):
+            error_resp["need_login"] = True
+        return jsonify(error_resp)
 
 
 import threading
@@ -94,9 +236,10 @@ import threading
 def background_download(ali, file_ids, drive_id):
     """后台下载任务"""
     try:
-        print(f"Starting download for {len(file_ids)} files to {ALI_DOWNLOAD_PATH}")
-        if not os.path.exists(ALI_DOWNLOAD_PATH):
-            os.makedirs(ALI_DOWNLOAD_PATH)
+        download_path = cfg('ALI_DOWNLOAD_PATH', '/downloads')
+        print(f"Starting download for {len(file_ids)} files to {download_path}")
+        if not os.path.exists(download_path):
+            os.makedirs(download_path)
 
         # 1. 获取文件对象 (Download 需要 BaseFile 对象或类似结构)
         # aligo.download_files 需要 BaseFile 对象列表
@@ -121,9 +264,9 @@ def background_download(ali, file_ids, drive_id):
         for f in target_files:
             try:
                 if f.type == 'file':
-                    ali.download_file(file=f, local_folder=ALI_DOWNLOAD_PATH)
+                    ali.download_file(file=f, local_folder=download_path)
                 elif f.type == 'folder':
-                    ali.download_folder(f.file_id, local_folder=ALI_DOWNLOAD_PATH)
+                    ali.download_folder(f.file_id, local_folder=download_path)
             except Exception as e:
                 print(f"Download failed for {f.name}: {e}")
 
@@ -149,7 +292,7 @@ def aliyun_download():
         
         return jsonify({
             "status": "success", 
-            "message": f"已开始下载 {len(file_ids)} 个任务到服务器 {ALI_DOWNLOAD_PATH} 目录"
+            "message": f"已开始下载 {len(file_ids)} 个任务到服务器 {cfg('ALI_DOWNLOAD_PATH', '/downloads')} 目录"
         })
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)})
@@ -298,8 +441,8 @@ def aliyun_upload():
 def get_alist_storages():
     """获取 Alist 所有存储挂载信息"""
     try:
-        res = requests.get(f"{ALIST_URL}/api/admin/storage/list?page=1&per_page=0",
-                           headers={'Authorization': ADMIN_TOKEN})
+        res = requests.get(f"{cfg('ALIST_URL', 'http://localhost:5234')}/api/admin/storage/list?page=1&per_page=0",
+                           headers={'Authorization': cfg('ADMIN_TOKEN', '')})
         data = res.json()
         if data.get('code') == 200:
             return data.get('data', {}).get('content', [])
@@ -319,7 +462,7 @@ def search():
     if not keyword:
         return jsonify({"status": "error", "message": "请输入关键词"})
 
-    search_url = f"{XIAOYA_URL}/search"
+    search_url = f"{cfg('XIAOYA_URL', 'http://localhost:5678')}/search"
     params = {"box": keyword, "url": "", "type": "video"}
     headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)'}
 
@@ -349,7 +492,7 @@ def search():
                 results.append({
                     "name": candidate.split('/')[-1], 
                     "path": candidate,
-                    "url": f"{XIAOYA_URL.rstrip('/')}{candidate}"
+                    "url": f"{cfg('XIAOYA_URL', 'http://localhost:5678').rstrip('/')}{candidate}"
                 })
 
         return jsonify({"status": "success", "results": results[:100]})
@@ -591,7 +734,7 @@ def transfer():
              return jsonify({"status": "error", "message": "无法定位目标文件"})
 
         target_name = found_target.name
-        save_to_parent_id = ALI_TARGET_FOLDER_ID
+        save_to_parent_id = cfg('ALI_TARGET_FOLDER_ID', 'root')
         
         # 如果是文件：创建同名文件夹（去后缀），转存该文件
         if getattr(found_target, 'type', 'folder') == 'file':
@@ -600,7 +743,7 @@ def transfer():
             
             # 创建目标目录
             try:
-                new_folder = ali.create_folder(target_name, ALI_TARGET_FOLDER_ID)
+                new_folder = ali.create_folder(target_name, cfg('ALI_TARGET_FOLDER_ID', 'root'))
                 if new_folder:
                     save_to_parent_id = new_folder.file_id
                     ali.batch_share_file_saveto_drive(transfer_file_ids, share_token_obj, save_to_parent_id)
@@ -610,7 +753,7 @@ def transfer():
         else:
             # 如果是文件夹（或 Root）：创建同名文件夹，递归转存
             try:
-                new_folder = ali.create_folder(target_name, ALI_TARGET_FOLDER_ID)
+                new_folder = ali.create_folder(target_name, cfg('ALI_TARGET_FOLDER_ID', 'root'))
                 if new_folder:
                     save_to_parent_id = new_folder.file_id
                     # 使用递归转存
@@ -630,6 +773,114 @@ def transfer():
         traceback.print_exc()
         print(f"Transfer error: {e}")
         return jsonify({"status": "error", "message": f"转存失败: {str(e)}"})
+
+
+# ==================== 配置管理 API ====================
+
+@app.route('/api/config/list', methods=['GET'])
+def config_list():
+    """获取所有配置"""
+    try:
+        configs = get_all_configs()
+        return jsonify({"status": "success", "configs": configs})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)})
+
+
+@app.route('/api/config/set', methods=['POST'])
+def config_set():
+    """设置配置"""
+    key = request.json.get('key', '').strip()
+    value = request.json.get('value', '').strip()
+    description = request.json.get('description', '')
+
+    if not key or not value:
+        return jsonify({"status": "error", "message": "key 和 value 不能为空"})
+
+    try:
+        set_config(key, value, description)
+        return jsonify({"status": "success", "message": f"配置 {key} 已保存"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)})
+
+
+@app.route('/api/config/delete', methods=['POST'])
+def config_delete():
+    """删除配置"""
+    key = request.json.get('key', '').strip()
+    if not key:
+        return jsonify({"status": "error", "message": "key 不能为空"})
+
+    try:
+        delete_config(key)
+        return jsonify({"status": "success", "message": f"配置 {key} 已删除"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)})
+
+
+# ==================== 阿里云盘扫码登录 API ====================
+
+@app.route('/api/ali/qr_login', methods=['POST'])
+def ali_qr_login():
+    """发起二维码登录"""
+    import threading
+    if _qr_login_state['active']:
+        return jsonify({"status": "error", "message": "已有登录流程进行中"})
+
+    _qr_login_state['qr_image_b64'] = None
+    _qr_login_state['status'] = 'idle'
+    _qr_login_state['message'] = ''
+
+    thread = threading.Thread(target=_start_qr_login, daemon=True)
+    thread.start()
+
+    # 等待二维码生成（最多10秒）
+    for _ in range(100):
+        if _qr_login_state['qr_image_b64'] or _qr_login_state['status'] in ('error', 'expired'):
+            break
+        time.sleep(0.1)
+
+    return jsonify({
+        "status": "success",
+        "qr_image": _qr_login_state['qr_image_b64'],
+        "login_status": _qr_login_state['status'],
+        "message": _qr_login_state['message'],
+    })
+
+
+@app.route('/api/ali/qr_status', methods=['GET'])
+def ali_qr_status():
+    """查询二维码扫码状态"""
+    return jsonify({
+        "status": "success",
+        "login_status": _qr_login_state['status'],
+        "message": _qr_login_state['message'],
+        "active": _qr_login_state['active'],
+    })
+
+
+@app.route('/api/ali/token_status', methods=['GET'])
+def ali_token_status():
+    """检查当前 token 状态"""
+    token_info = get_ali_token()
+    has_token = bool(token_info and token_info.get('refresh_token'))
+
+    # 尝试验证 token 是否有效
+    valid = False
+    if has_token:
+        try:
+            ali = get_ali()
+            ali.get_user()
+            valid = True
+        except Exception:
+            valid = False
+
+    return jsonify({
+        "status": "success",
+        "has_token": has_token,
+        "valid": valid,
+        "updated_at": token_info.get('updated_at', '') if token_info else '',
+    })
 
 
 if __name__ == '__main__':
