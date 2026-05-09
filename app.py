@@ -326,10 +326,9 @@ def aliyun_files():
 
 import threading
 
-def background_download(ali, file_ids, drive_id):
+def background_download(ali, file_ids, drive_id, download_path):
     """后台下载任务"""
     try:
-        download_path = cfg('ALI_DOWNLOAD_PATH', '/downloads')
         print(f"Starting download for {len(file_ids)} files to {download_path}")
         if not os.path.exists(download_path):
             os.makedirs(download_path)
@@ -370,22 +369,28 @@ def background_download(ali, file_ids, drive_id):
 
 @app.route('/api/aliyun/download', methods=['POST'])
 def aliyun_download():
-    """下载选中文件到宿主机映射目录"""
+    """下载选中文件到宿主机指定目录"""
     file_ids = request.json.get('file_ids', [])
     drive_id = request.json.get('drive_id')
+    download_path = request.json.get('download_path', '').strip()
 
     if not file_ids:
         return jsonify({"status": "error", "message": "未选择任何文件"})
+    if not download_path:
+        return jsonify({"status": "error", "message": "请选择下载目录"})
+
+    # 安全检查：规范化路径
+    download_path = os.path.normpath(os.path.abspath(download_path))
 
     try:
         ali = get_ali()
         # 启动后台线程下载
-        thread = threading.Thread(target=background_download, args=(ali, file_ids, drive_id))
+        thread = threading.Thread(target=background_download, args=(ali, file_ids, drive_id, download_path))
         thread.start()
         
         return jsonify({
             "status": "success", 
-            "message": f"已开始下载 {len(file_ids)} 个任务到服务器 {cfg('ALI_DOWNLOAD_PATH', '/downloads')} 目录"
+            "message": f"已开始下载 {len(file_ids)} 个任务到服务器 {download_path} 目录"
         })
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)})
@@ -827,8 +832,8 @@ def transfer():
              return jsonify({"status": "error", "message": "无法定位目标文件"})
 
         target_name = found_target.name
-        # 优先使用用户选择的目标目录，否则使用默认配置
-        target_folder_id = request.json.get('target_folder_id') or cfg('ALI_TARGET_FOLDER_ID', 'root')
+        # 使用用户选择的目标目录，未选择则默认根目录
+        target_folder_id = request.json.get('target_folder_id') or 'root'
         save_to_parent_id = target_folder_id
         
         # 如果是文件：创建同名文件夹（去后缀），转存该文件

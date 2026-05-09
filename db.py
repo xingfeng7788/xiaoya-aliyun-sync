@@ -126,8 +126,6 @@ def sync_env_to_db():
         'XIAOYA_URL': '小雅搜索地址',
         'ADMIN_TOKEN': 'Alist 管理员 Token',
         'ALI_REFRESH_TOKEN': '阿里云盘 Refresh Token',
-        'ALI_TARGET_FOLDER_ID': '阿里云盘目标文件夹 ID',
-        'ALI_DOWNLOAD_PATH': '下载保存路径',
         'PUSHPLUS_TOKEN': 'PushPlus 通知 Token',
         'PUSHPLUS_TOPIC': 'PushPlus 群组编码',
         'XIAOYA_EXTERNAL_URL': '小雅助手外部访问地址（用于通知链接）',

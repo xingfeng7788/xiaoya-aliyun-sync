@@ -213,6 +213,22 @@
                         </button>
                     </div>
 
+                    <!-- Download Dir Picker (hidden by default) -->
+                    <div id="downloadDirPicker" class="hidden px-6 pb-2">
+                        <div class="border rounded-lg bg-blue-50/50 p-3">
+                            <div class="flex items-center justify-between mb-2">
+                                <span class="text-sm font-medium text-gray-700"><i class="fas fa-folder-open text-blue-500 mr-1"></i>选择下载目录</span>
+                                <button onclick="cancelDownloadPicker()" class="text-gray-400 hover:text-gray-600 text-xs"><i class="fas fa-times"></i> 取消</button>
+                            </div>
+                            <div class="flex items-center gap-2 mb-2 text-xs text-gray-500">
+                                <span>当前路径:</span>
+                                <span id="dlDirCurrent" class="font-mono bg-white px-2 py-0.5 rounded border truncate">/</span>
+                                <button onclick="dlDirNav('..')" class="px-2 py-0.5 bg-white border rounded hover:bg-gray-100"><i class="fas fa-level-up-alt"></i> 上级</button>
+                            </div>
+                            <div id="dlDirEntries" class="max-h-40 overflow-y-auto space-y-0.5 text-xs"></div>
+                        </div>
+                    </div>
+
                     <!-- File List -->
                     <div class="px-6 py-2 bg-gray-50 min-h-[400px] max-h-[60vh] overflow-y-auto">
                         <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
@@ -593,25 +609,76 @@
             return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
         }
 
+        let _dlSelectedIds = [];
+        let _dlDirParent = null;
+
         async function downloadSelected() {
             const checkboxes = document.querySelectorAll('input[name="aliFile"]:checked');
             const ids = Array.from(checkboxes).map(cb => cb.value);
             
             if (ids.length === 0) return alert('请先选择要下载的文件或文件夹');
-            if (!confirm(`确定要下载选中的 ${ids.length} 个项目到服务器吗？`)) return;
-            
+
+            _dlSelectedIds = ids;
+            document.getElementById('downloadDirPicker').classList.remove('hidden');
+            loadDlDirs('/');
+        }
+
+        async function loadDlDirs(path) {
+            const el = document.getElementById('dlDirEntries');
+            el.innerHTML = '<div class="text-xs text-gray-400"><i class="fas fa-spinner fa-spin"></i> 加载中...</div>';
+            try {
+                const res = await fetch('/api/schedule/local_dirs', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({path}) });
+                const data = await res.json();
+                if (data.status !== 'success') { el.innerHTML = `<div class="text-xs text-red-500">${data.message}</div>`; return; }
+                document.getElementById('dlDirCurrent').textContent = data.path;
+                _dlDirParent = data.parent;
+                let html = '';
+                if (data.dirs.length > 0) {
+                    html = data.dirs.map(d => {
+                        const pathJson = JSON.stringify(d.path);
+                        return `
+                        <div class="flex items-center gap-2 px-2 py-1 rounded hover:bg-white cursor-pointer" onclick='loadDlDirs(${pathJson})'>
+                            <i class="fas fa-folder text-yellow-400"></i>
+                            <span class="flex-1 truncate">${d.name}</span>
+                            <button onclick="event.stopPropagation();confirmDownload(${pathJson})" class="text-blue-600 hover:underline text-xs">选择</button>
+                        </div>`;
+                    }).join('');
+                } else {
+                    html = '<div class="text-xs text-gray-400 px-2">无子目录</div>';
+                }
+                const curPathJson = JSON.stringify(data.path);
+                html += `<div class="mt-2 border-t pt-2"><button onclick='confirmDownload(${curPathJson})' class="w-full py-1.5 bg-blue-600 text-white rounded text-xs hover:bg-blue-700"><i class="fas fa-download mr-1"></i>下载到当前目录: ${data.path}</button></div>`;
+                el.innerHTML = html;
+            } catch(e) { el.innerHTML = '<div class="text-xs text-red-500">加载失败</div>'; }
+        }
+
+        function dlDirNav(dir) {
+            if (dir === '..' && _dlDirParent) loadDlDirs(_dlDirParent);
+        }
+
+        function cancelDownloadPicker() {
+            document.getElementById('downloadDirPicker').classList.add('hidden');
+            _dlSelectedIds = [];
+        }
+
+        async function confirmDownload(downloadPath) {
+            document.getElementById('downloadDirPicker').classList.add('hidden');
+            if (_dlSelectedIds.length === 0) return;
+
             try {
                 const res = await fetch('/api/aliyun/download', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({
-                        file_ids: ids,
-                        drive_id: currentDriveId
+                        file_ids: _dlSelectedIds,
+                        drive_id: currentDriveId,
+                        download_path: downloadPath
                     })
                 });
                 const data = await res.json();
                 alert(data.message);
-                checkboxes.forEach(cb => cb.checked = false);
+                document.querySelectorAll('input[name="aliFile"]:checked').forEach(cb => cb.checked = false);
+                _dlSelectedIds = [];
             } catch (e) {
                 alert('下载请求失败');
             }
@@ -1011,7 +1078,6 @@
             { key: 'ADMIN_TOKEN', desc: '小雅管理员 Token', placeholder: '小雅后台管理密码', required: true },
             { key: 'XIAOYA_EXTERNAL_URL', desc: '外部访问地址', placeholder: '如 http://your-ip:5666，通知链接用', required: true },
             { key: 'ALIST_URL', desc: 'Alist 服务地址', placeholder: '如 http://127.0.0.1:5234', required: false },
-            { key: 'ALI_TARGET_FOLDER_ID', desc: '云盘默认目标文件夹 ID', placeholder: '阿里云盘文件夹 ID', required: false },
             { key: 'HOST', desc: '监听地址', placeholder: '默认 0.0.0.0', required: false },
             { key: 'PORT', desc: '监听端口', placeholder: '默认 5666', required: false },
         ];
