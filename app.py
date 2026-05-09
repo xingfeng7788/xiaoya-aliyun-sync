@@ -1103,7 +1103,62 @@ from scheduler import (
     add_task_job, remove_task_job, run_task_manual, get_job_next_run,
     set_token_check_func, set_token_refresh_func
 )
-from datetime import datetime
+import re
+from datetime import datetime, timedelta
+
+_DATE_FOLDER_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+
+
+def _create_date_subfolder(ali, parent_file_id, log_id):
+    """在目标目录下创建以当天日期命名的子文件夹，若已存在则先删除再重建"""
+    today_str = datetime.now().strftime('%Y-%m-%d')
+
+    # 检查是否已存在同名日期文件夹，存在则先删除
+    file_list = ali.get_file_list(parent_file_id=parent_file_id)
+    for f in file_list:
+        if f.type == 'folder' and f.name == today_str:
+            append_schedule_log_detail(log_id, f"日期文件夹 {today_str} 已存在，先删除旧数据")
+            ali.batch_move_to_trash([f.file_id])
+            append_schedule_log_detail(log_id, f"  ✓ 已删除旧日期文件夹")
+            break
+
+    append_schedule_log_detail(log_id, f"创建日期文件夹: {today_str}")
+    result = ali.create_folder(
+        name=today_str,
+        parent_file_id=parent_file_id,
+        check_name_mode='refuse'
+    )
+    append_schedule_log_detail(log_id, f"  日期文件夹 ID: {result.file_id}")
+    return result.file_id
+
+
+def _cleanup_old_date_folders(ali, parent_file_id, retain_days, log_id):
+    """清理目标目录中超过保留天数的日期文件夹（仅匹配 YYYY-MM-DD 格式）"""
+    try:
+        cutoff = datetime.now() - timedelta(days=retain_days)
+        file_list = ali.get_file_list(parent_file_id=parent_file_id)
+        expired_ids = []
+        for f in file_list:
+            if f.type != 'folder' or not f.name:
+                continue
+            if not _DATE_FOLDER_RE.match(f.name):
+                continue
+            try:
+                folder_date = datetime.strptime(f.name, '%Y-%m-%d')
+            except ValueError:
+                continue
+            if folder_date < cutoff:
+                expired_ids.append(f.file_id)
+                append_schedule_log_detail(log_id, f"  待清理过期文件夹: {f.name}")
+
+        if expired_ids:
+            append_schedule_log_detail(log_id, f"清理 {len(expired_ids)} 个过期文件夹（保留 {retain_days} 天）")
+            ali.batch_move_to_trash(expired_ids)
+            append_schedule_log_detail(log_id, f"  ✓ 过期文件夹已移入回收站")
+        else:
+            append_schedule_log_detail(log_id, f"无过期文件夹需要清理（保留 {retain_days} 天）")
+    except Exception as e:
+        append_schedule_log_detail(log_id, f"  ✗ 清理过期文件夹失败: {e}")
 
 
 def _execute_upload_task(task, log_id):
@@ -1125,6 +1180,9 @@ def _execute_upload_task(task, log_id):
     skipped_count = 0
 
     try:
+        # 在目标目录下创建当天日期子文件夹（已存在则先删除再重建）
+        date_folder_id = _create_date_subfolder(ali, remote_folder_id, log_id)
+
         entries = os.listdir(local_dir)
         append_schedule_log_detail(log_id, f"扫描到 {len(entries)} 个文件/文件夹")
 
@@ -1133,12 +1191,12 @@ def _execute_upload_task(task, log_id):
             try:
                 if os.path.isfile(full_path):
                     append_schedule_log_detail(log_id, f"上传文件: {entry_name}")
-                    ali.upload_file(full_path, parent_file_id=remote_folder_id)
+                    ali.upload_file(full_path, parent_file_id=date_folder_id)
                     uploaded_count += 1
                     append_schedule_log_detail(log_id, f"  ✓ 上传成功: {entry_name}")
                 elif os.path.isdir(full_path):
                     append_schedule_log_detail(log_id, f"上传文件夹: {entry_name}")
-                    ali.upload_folder(full_path, parent_file_id=remote_folder_id)
+                    ali.upload_folder(full_path, parent_file_id=date_folder_id)
                     uploaded_count += 1
                     append_schedule_log_detail(log_id, f"  ✓ 上传成功: {entry_name}")
                 else:
@@ -1151,6 +1209,14 @@ def _execute_upload_task(task, log_id):
         append_schedule_log_detail(log_id, f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
         status = 'success' if failed_count == 0 else 'partial'
         update_schedule_log(log_id, status, msg)
+
+        # 上传完成后，清理过期日期文件夹
+        retain_days = 3
+        try:
+            retain_days = int(cfg('ALI_RETAIN_DAYS', '3'))
+        except (ValueError, TypeError):
+            pass
+        _cleanup_old_date_folders(ali, remote_folder_id, retain_days, log_id)
 
     except Exception as e:
         append_schedule_log_detail(log_id, f"[ERROR] {e}")
