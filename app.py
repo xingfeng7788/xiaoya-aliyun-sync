@@ -68,7 +68,13 @@ def get_ali(force_new=False):
         refresh_token = _get_refresh_token()
         if not refresh_token:
             raise Exception("未配置阿里云盘 Token，请先通过页面扫码登录或在配置管理中设置 ALI_REFRESH_TOKEN")
-        _ali_instance = Aligo(refresh_token=refresh_token, re_login=False, use_aria2=True)
+        try:
+            _ali_instance = Aligo(refresh_token=refresh_token, re_login=False, use_aria2=True)
+        except Exception as e:
+            _ali_instance = None
+            if _is_auth_error(e):
+                notify_token_expired()
+            raise
         # 登录成功后，保存 token 到数据库
         if _ali_instance.token:
             save_ali_token(
@@ -183,6 +189,76 @@ def _is_auth_error(e):
     return any(kw in msg for kw in ['refreshfailed', 'token', 'unauthorized', '401', 'invalidtoken', 'expired'])
 
 
+# ==================== PushPlus 通知 ====================
+
+_pushplus_last_notify_time = 0  # 防止短时间内重复发送
+
+
+def send_pushplus_notification(title, content):
+    """通过 PushPlus 发送通知"""
+    global _pushplus_last_notify_time
+    token = cfg('PUSHPLUS_TOKEN', '')
+    if not token:
+        print('PushPlus 未配置 token，跳过通知')
+        return False
+
+    # 防抖：5分钟内不重复发送同类通知
+    now = time.time()
+    if now - _pushplus_last_notify_time < 300:
+        print('PushPlus 通知发送过于频繁，跳过')
+        return False
+
+    try:
+        resp = requests.post('https://www.pushplus.plus/send', json={
+            'token': token,
+            'title': title,
+            'content': content,
+            'template': 'html',
+            'topic': cfg('PUSHPLUS_TOPIC', ''),
+        }, timeout=10)
+        result = resp.json()
+        if result.get('code') == 200:
+            _pushplus_last_notify_time = now
+            print(f'PushPlus 通知发送成功: {title}')
+            return True
+        else:
+            print(f'PushPlus 通知发送失败: {result.get("msg", "未知错误")}')
+            return False
+    except Exception as e:
+        print(f'PushPlus 通知发送异常: {e}')
+        return False
+
+
+def notify_token_expired():
+    """Token 失效时发送 PushPlus 通知"""
+    host = cfg('XIAOYA_EXTERNAL_URL', '') or f'http://{HOST}:{PORT}'
+    send_pushplus_notification(
+        '⚠️ 小雅助手 - 阿里云盘登录已失效',
+        f'''
+        <h2>阿里云盘 Token 已失效</h2>
+        <p>您的阿里云盘 refresh_token 已过期，自动刷新失败。</p>
+        <p>请尽快打开小雅助手重新扫码登录：</p>
+        <p><a href="{host}" target="_blank">{host}</a></p>
+        <p>打开页面后点击 <b>配置管理</b> → <b>扫码登录</b> 即可。</p>
+        <hr>
+        <p style="color:#999;font-size:12px;">此消息由小雅资源助手自动发送</p>
+        '''
+    )
+
+
+def _sync_token_to_db(ali):
+    """将 aligo 实例中最新的 token 同步到数据库（aligo 内部自动刷新后 token 会变）"""
+    try:
+        if ali and ali.token and ali.token.refresh_token:
+            save_ali_token(
+                refresh_token=ali.token.refresh_token,
+                access_token=ali.token.access_token,
+                token_data=ali.token.to_dict() if hasattr(ali.token, 'to_dict') else None
+            )
+    except Exception:
+        pass
+
+
 @app.route('/api/aliyun/files', methods=['POST'])
 def aliyun_files():
     """获取阿里云盘文件列表"""
@@ -228,7 +304,11 @@ def aliyun_files():
         error_resp = {"status": "error", "message": str(e)}
         if _is_auth_error(e):
             error_resp["need_login"] = True
+            notify_token_expired()
         return jsonify(error_resp)
+    finally:
+        if _ali_instance:
+            _sync_token_to_db(_ali_instance)
 
 
 import threading
@@ -772,7 +852,14 @@ def transfer():
     except Exception as e:
         traceback.print_exc()
         print(f"Transfer error: {e}")
-        return jsonify({"status": "error", "message": f"转存失败: {str(e)}"})
+        error_resp = {"status": "error", "message": f"转存失败: {str(e)}"}
+        if _is_auth_error(e):
+            error_resp["need_login"] = True
+            notify_token_expired()
+        return jsonify(error_resp)
+    finally:
+        if _ali_instance:
+            _sync_token_to_db(_ali_instance)
 
 
 # ==================== 配置管理 API ====================
@@ -881,6 +968,23 @@ def ali_token_status():
         "valid": valid,
         "updated_at": token_info.get('updated_at', '') if token_info else '',
     })
+
+
+@app.route('/api/pushplus/test', methods=['POST'])
+def pushplus_test():
+    """测试 PushPlus 通知"""
+    token = cfg('PUSHPLUS_TOKEN', '')
+    if not token:
+        return jsonify({"status": "error", "message": "请先在配置管理中设置 PUSHPLUS_TOKEN"})
+
+    success = send_pushplus_notification(
+        '✅ 小雅助手 - 测试通知',
+        '<h2>通知测试成功</h2><p>如果您收到了这条消息，说明 PushPlus 通知配置正确。</p>'
+    )
+    if success:
+        return jsonify({"status": "success", "message": "测试通知已发送，请检查微信"})
+    else:
+        return jsonify({"status": "error", "message": "发送失败，请检查 PUSHPLUS_TOKEN 是否正确"})
 
 
 if __name__ == '__main__':
