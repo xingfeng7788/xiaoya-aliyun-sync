@@ -942,6 +942,14 @@
                                         <button onclick="setCron('0 0 1 * *')" class="px-2 py-0.5 bg-gray-100 rounded text-xs text-gray-600 hover:bg-green-100 hover:text-green-700">每月1号0:00</button>
                                     </div>
                                 </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">同步模式</label>
+                                    <select id="schSyncMode" class="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-green-400 outline-none">
+                                        <option value="snapshot">按日期全量备份（现有方式）</option>
+                                        <option value="mirror">1:1 镜像同步（增量 + 同步删除）</option>
+                                    </select>
+                                    <p id="schSyncModeHint" class="mt-1 text-xs text-red-500 hidden">警告：云端目标目录中本地不存在的文件会被移入回收站，请为此任务选择专用目录。</p>
+                                </div>
                                 <div class="pt-2">
                                     <button onclick="saveTask()" class="w-full py-2.5 bg-green-600 text-white rounded-lg font-medium hover:bg-green-700 transition-colors"><i class="fas fa-save mr-1"></i>保存任务</button>
                                 </div>
@@ -1476,6 +1484,7 @@
                                     <div><i class="fas fa-folder text-yellow-500 mr-1 w-4"></i>${t.local_dir}</div>
                                     <div><i class="fas fa-cloud text-blue-500 mr-1 w-4"></i>${t.remote_folder_name}</div>
                                     <div><i class="fas fa-clock text-green-500 mr-1 w-4"></i><code class="bg-gray-100 px-1 rounded">${t.cron_expr}</code> ${nextRun}</div>
+                                    <div><i class="fas fa-sync text-purple-500 mr-1 w-4"></i>${t.sync_mode === 'mirror' ? '1:1 镜像同步' : '按日期全量备份'}</div>
                                 </div>
                             </div>
                             <div class="flex items-center gap-1 flex-shrink-0">
@@ -1503,6 +1512,8 @@
             document.getElementById('schRemoteId').value = taskData ? taskData.remote_folder_id : 'root';
             document.getElementById('schRemoteName').textContent = taskData ? taskData.remote_folder_name : '根目录';
             document.getElementById('schCron').value = taskData ? taskData.cron_expr : '';
+            document.getElementById('schSyncMode').value = taskData ? (taskData.sync_mode || 'snapshot') : 'snapshot';
+            updateSyncModeHint();
             document.getElementById('localDirPicker').classList.add('hidden');
             document.getElementById('remoteFolderPicker').classList.add('hidden');
         }
@@ -1515,6 +1526,10 @@
         }
 
         function setCron(expr) { document.getElementById('schCron').value = expr; }
+        function updateSyncModeHint() {
+            document.getElementById('schSyncModeHint').classList.toggle('hidden', document.getElementById('schSyncMode').value !== 'mirror');
+        }
+        document.getElementById('schSyncMode').addEventListener('change', updateSyncModeHint);
 
         async function saveTask() {
             const editId = document.getElementById('schEditId').value;
@@ -1524,8 +1539,10 @@
                 remote_folder_id: document.getElementById('schRemoteId').value,
                 remote_folder_name: document.getElementById('schRemoteName').textContent.trim(),
                 cron_expr: document.getElementById('schCron').value.trim(),
+                sync_mode: document.getElementById('schSyncMode').value,
             };
             if (!payload.name || !payload.local_dir || !payload.cron_expr) return alert('请填写所有必填项');
+            if (payload.sync_mode === 'mirror' && !confirm('1:1 镜像同步会把云端目标目录中本地不存在的内容移入回收站。确认使用该目录进行镜像同步？')) return;
             try {
                 const url = editId ? `/api/schedule/task/${editId}` : '/api/schedule/task';
                 const method = editId ? 'PUT' : 'POST';

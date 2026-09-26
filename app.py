@@ -7,6 +7,7 @@ import traceback
 import uuid
 import secrets
 import _thread
+import hashlib
 
 import requests
 import qrcode
@@ -1161,6 +1162,121 @@ def _cleanup_old_date_folders(ali, parent_file_id, retain_days, log_id):
         append_schedule_log_detail(log_id, f"  ✗ 清理过期文件夹失败: {e}")
 
 
+def _file_sha1(path):
+    """分块计算本地文件 SHA1，避免读取大文件时一次占用过多内存。"""
+    digest = hashlib.sha1()
+    with open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(4 * 1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest().upper()
+
+
+def _execute_mirror_sync(ali, local_dir, remote_folder_id, log_id):
+    """将本地目录递归镜像到云端目录，返回统计信息。
+
+    这个模式以本地目录为唯一数据源，语义近似：
+        rsync -a --delete local_dir/ aliyun_drive_folder/
+
+    同步规则：
+    1. 本地存在、云端不存在：上传文件或创建目录。
+    2. 两端存在同名文件：先比较大小，再比较 SHA1；都相同才跳过，
+       否则使用 overwrite 覆盖云端文件。因此同大小但内容变化也能识别。
+    3. 两端存在同名目录：递归执行相同的比较逻辑。
+    4. 同名项类型不同（文件变目录或目录变文件）：以本地类型为准，
+       先将云端冲突项移入回收站，再创建或上传本地项。
+    5. 仅存在于云端的项：先加入待删除列表。只有整轮上传没有失败时，
+       才批量移入回收站；发生上传失败则取消删除，避免因临时故障误删数据。
+    6. 符号链接不跟随也不上传，避免目录循环和同步到本地目录之外。
+
+    注意：这里直接同步到用户选择的 remote_folder_id，不创建日期子目录；
+    所以镜像模式应使用专用云端目录。
+    """
+    # 统计结果会写入任务日志。uploaded 包含新文件和新建目录。
+    stats = {'uploaded': 0, 'updated': 0, 'deleted': 0, 'skipped': 0, 'failed': 0}
+
+    # 云端多余项暂不立即删除，先完成所有目录的扫描和上传。
+    pending_delete_ids = []
+
+    def sync_dir(local_path, remote_id, relative_path=''):
+        # 为当前层建立“名称 -> 云端对象”的索引，后面可以 O(1) 匹配同名项。
+        remote_items = ali.get_file_list(parent_file_id=remote_id)
+        remote_by_name = {}
+        for item in remote_items:
+            # 极少数情况下云端可能存在重名项；保留一个用于匹配，其余视为多余项。
+            if item.name in remote_by_name:
+                pending_delete_ids.append(item.file_id)
+            else:
+                remote_by_name[item.name] = item
+
+        local_names = set()
+        with os.scandir(local_path) as entries:
+            for entry in entries:
+                # 不跟随符号链接，否则可能遍历出当前同步根目录，甚至形成循环。
+                if entry.is_symlink():
+                    stats['skipped'] += 1
+                    append_schedule_log_detail(log_id, f"跳过符号链接: {os.path.join(relative_path, entry.name)}")
+                    continue
+                local_names.add(entry.name)
+                rel = os.path.join(relative_path, entry.name)
+                remote = remote_by_name.get(entry.name)
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        # 本地是目录而云端同名项是文件：按本地类型纠正云端。
+                        if remote and remote.type != 'folder':
+                            ali.batch_move_to_trash([remote.file_id])
+                            stats['deleted'] += 1
+                            remote = None
+                        if not remote:
+                            remote = ali.create_folder(entry.name, parent_file_id=remote_id, check_name_mode='refuse')
+                            stats['uploaded'] += 1
+                            append_schedule_log_detail(log_id, f"创建目录: {rel}")
+                        sync_dir(entry.path, remote.file_id, rel)
+                    elif entry.is_file(follow_symlinks=False):
+                        # 大小不同必然需要上传；大小相同时再算 SHA1，既减少磁盘读取，
+                        # 又能识别“大小没变但内容已经改变”的文件。
+                        unchanged = False
+                        if remote and remote.type == 'file' and remote.size == entry.stat().st_size:
+                            unchanged = bool(remote.content_hash) and remote.content_hash.upper() == _file_sha1(entry.path)
+                        if unchanged:
+                            stats['skipped'] += 1
+                        else:
+                            # 本地是文件而云端同名项是目录：同样以本地类型为准。
+                            if remote and remote.type == 'folder':
+                                ali.batch_move_to_trash([remote.file_id])
+                                stats['deleted'] += 1
+                                remote = None
+                            ali.upload_file(entry.path, parent_file_id=remote_id,
+                                            name=entry.name, check_name_mode='overwrite')
+                            key = 'updated' if remote else 'uploaded'
+                            stats[key] += 1
+                            append_schedule_log_detail(log_id, f"{'更新' if remote else '上传'}文件: {rel}")
+                    else:
+                        stats['skipped'] += 1
+                except Exception as e:
+                    stats['failed'] += 1
+                    append_schedule_log_detail(log_id, f"  ✗ 同步失败 {rel}: {e}")
+
+        # 当前层扫描完成后，云端有而本地没有的名称就是“本地已删除”的项。
+        # 删除整个云端目录即可，无需把目录内的子项逐个加入列表。
+        for name, item in remote_by_name.items():
+            if name not in local_names:
+                pending_delete_ids.append(item.file_id)
+                append_schedule_log_detail(log_id, f"待删除云端多余项: {os.path.join(relative_path, name)}")
+
+    sync_dir(local_dir, remote_folder_id)
+    # 上传/扫描完整成功后才执行删除，防止权限、网络等暂时性错误造成误删。
+    # 每批最多 100 个，符合阿里云盘批量接口的常见限制。
+    if stats['failed'] == 0 and pending_delete_ids:
+        for start in range(0, len(pending_delete_ids), 100):
+            batch = pending_delete_ids[start:start + 100]
+            ali.batch_move_to_trash(batch)
+            stats['deleted'] += len(batch)
+        append_schedule_log_detail(log_id, f"✓ 已将 {stats['deleted']} 个云端多余项移入回收站")
+    elif pending_delete_ids:
+        append_schedule_log_detail(log_id, f"检测到同步失败，安全起见取消删除 {len(pending_delete_ids)} 个云端项")
+    return stats
+
+
 def _execute_upload_task(task, log_id):
     """执行上传任务的具体逻辑"""
     local_dir = task['local_dir']
@@ -1180,6 +1296,17 @@ def _execute_upload_task(task, log_id):
     skipped_count = 0
 
     try:
+        # snapshot：原有逻辑，按日期目录做全量备份。
+        # mirror：新增逻辑，直接让目标目录与本地目录保持 1:1。
+        if task.get('sync_mode', 'snapshot') == 'mirror':
+            append_schedule_log_detail(log_id, "同步模式: 1:1 镜像（增量上传并同步删除）")
+            stats = _execute_mirror_sync(ali, local_dir, remote_folder_id, log_id)
+            msg = (f"完成: 新增 {stats['uploaded']}, 更新 {stats['updated']}, "
+                   f"删除 {stats['deleted']}, 未变化 {stats['skipped']}, 失败 {stats['failed']}")
+            append_schedule_log_detail(log_id, f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
+            update_schedule_log(log_id, 'success' if stats['failed'] == 0 else 'partial', msg)
+            return
+
         # 在目标目录下创建当天日期子文件夹（已存在则先删除再重建）
         date_folder_id = _create_date_subfolder(ali, remote_folder_id, log_id)
 
@@ -1287,6 +1414,7 @@ def schedule_task_create():
     remote_folder_id = data.get('remote_folder_id', 'root').strip()
     remote_folder_name = data.get('remote_folder_name', '根目录').strip()
     cron_expr = data.get('cron_expr', '').strip()
+    sync_mode = data.get('sync_mode', 'snapshot').strip()
 
     if not name:
         return jsonify({"status": "error", "message": "任务名称不能为空"})
@@ -1294,6 +1422,8 @@ def schedule_task_create():
         return jsonify({"status": "error", "message": "本地目录不能为空"})
     if not cron_expr:
         return jsonify({"status": "error", "message": "Cron 表达式不能为空"})
+    if sync_mode not in ('snapshot', 'mirror'):
+        return jsonify({"status": "error", "message": "无效的同步模式"})
 
     # 校验 cron 表达式
     from apscheduler.triggers.cron import CronTrigger
@@ -1302,7 +1432,7 @@ def schedule_task_create():
     except Exception as e:
         return jsonify({"status": "error", "message": f"无效的 Cron 表达式: {e}"})
 
-    task_id = create_schedule_task(name, local_dir, remote_folder_id, remote_folder_name, cron_expr)
+    task_id = create_schedule_task(name, local_dir, remote_folder_id, remote_folder_name, cron_expr, sync_mode)
     add_task_job(task_id, cron_expr)
     return jsonify({"status": "success", "message": "任务创建成功", "task_id": task_id})
 
@@ -1321,6 +1451,9 @@ def schedule_task_update(task_id):
     remote_folder_name = data.get('remote_folder_name', task['remote_folder_name']).strip()
     cron_expr = data.get('cron_expr', task['cron_expr']).strip()
     enabled = data.get('enabled', task['enabled'])
+    sync_mode = data.get('sync_mode', task.get('sync_mode', 'snapshot')).strip()
+    if sync_mode not in ('snapshot', 'mirror'):
+        return jsonify({"status": "error", "message": "无效的同步模式"})
 
     from apscheduler.triggers.cron import CronTrigger
     try:
@@ -1328,7 +1461,7 @@ def schedule_task_update(task_id):
     except Exception as e:
         return jsonify({"status": "error", "message": f"无效的 Cron 表达式: {e}"})
 
-    update_schedule_task(task_id, name, local_dir, remote_folder_id, remote_folder_name, cron_expr, enabled)
+    update_schedule_task(task_id, name, local_dir, remote_folder_id, remote_folder_name, cron_expr, enabled, sync_mode)
     if enabled:
         add_task_job(task_id, cron_expr)
     else:
