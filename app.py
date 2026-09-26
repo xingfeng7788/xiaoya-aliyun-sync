@@ -1417,4 +1417,6 @@ def list_local_dirs():
 
 
 if __name__ == '__main__':
+    HOST = "0.0.0.0"
+    PORT = "5666"
     app.run(host=HOST, port=PORT)
