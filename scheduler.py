@@ -86,9 +86,15 @@ def _run_task(task_id, trigger_type='cron'):
         # 通知统一放在 finally：成功、部分成功、校验失败及异常都能覆盖。
         if task.get('notify_enabled') and _task_notify_func is not None:
             try:
-                sent = _task_notify_func(task, log_id, trigger_type)
+                result = _task_notify_func(task, log_id, trigger_type)
+                # 通知函数返回 (是否成功, 失败原因)，兼容只返回 bool 的实现。
+                if isinstance(result, tuple):
+                    sent, reason = result
+                else:
+                    sent, reason = bool(result), ''
                 if not sent:
-                    append_schedule_log_detail(log_id, "[WARN] PushPlus 执行结果通知发送失败或未配置 Token")
+                    reason = reason or '未知原因'
+                    append_schedule_log_detail(log_id, f"[WARN] PushPlus 执行结果通知发送失败: {reason}")
             except Exception as e:
                 # 通知失败不能反过来改变同步任务的执行结果。
                 print(f"任务 [{task['name']}] PushPlus 通知异常: {e}")

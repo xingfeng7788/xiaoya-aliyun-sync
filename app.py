@@ -295,20 +295,25 @@ def _is_auth_error(e):
 # ==================== PushPlus 通知 ====================
 
 _pushplus_last_notify_time = 0  # 防止短时间内重复发送
+_pushplus_last_error = ''  # 保存最近一次失败原因，供任务执行日志展示
 
 
 def send_pushplus_notification(title, content, throttle=True):
     """通过 PushPlus 发送通知"""
-    global _pushplus_last_notify_time
-    token = cfg('PUSHPLUS_TOKEN', '')
+    global _pushplus_last_notify_time, _pushplus_last_error
+    _pushplus_last_error = ''
+    # 与配置管理页面使用同一个 config 表读取 Token，并清理意外的首尾空格。
+    token = (cfg('PUSHPLUS_TOKEN', '') or '').strip()
     if not token:
-        print('PushPlus 未配置 token，跳过通知')
+        _pushplus_last_error = '配置管理中未设置 PUSHPLUS_TOKEN'
+        print(f'PushPlus 通知失败: {_pushplus_last_error}')
         return False
 
     # 防抖：5分钟内不重复发送同类通知
     now = time.time()
     if throttle and now - _pushplus_last_notify_time < 300:
-        print('PushPlus 通知发送过于频繁，跳过')
+        _pushplus_last_error = '5 分钟防重复发送限制'
+        print(f'PushPlus 通知跳过: {_pushplus_last_error}')
         return False
 
     try:
@@ -319,7 +324,12 @@ def send_pushplus_notification(title, content, throttle=True):
             'template': 'html',
             'topic': cfg('PUSHPLUS_TOPIC', ''),
         }, timeout=10)
-        result = resp.json()
+        try:
+            result = resp.json()
+        except ValueError:
+            _pushplus_last_error = f'PushPlus 返回非 JSON 响应（HTTP {resp.status_code}）'
+            print(f'PushPlus 通知发送失败: {_pushplus_last_error}')
+            return False
         if result.get('code') == 200:
             # 只有需要防抖的 Token 告警才更新时间；任务结果通知互不抑制，
             # 也不能导致紧随其后的 Token 失效告警被错误跳过。
@@ -328,11 +338,18 @@ def send_pushplus_notification(title, content, throttle=True):
             print(f'PushPlus 通知发送成功: {title}')
             return True
         else:
-            print(f'PushPlus 通知发送失败: {result.get("msg", "未知错误")}')
+            _pushplus_last_error = f'PushPlus 接口返回 code={result.get("code")}: {result.get("msg", "未知错误")}'
+            print(f'PushPlus 通知发送失败: {_pushplus_last_error}')
             return False
     except Exception as e:
-        print(f'PushPlus 通知发送异常: {e}')
+        _pushplus_last_error = f'{type(e).__name__}: {e}'
+        print(f'PushPlus 通知发送异常: {_pushplus_last_error}')
         return False
+
+
+def get_pushplus_last_error():
+    """返回最近一次 PushPlus 发送失败的具体原因。"""
+    return _pushplus_last_error
 
 
 def notify_token_expired():
@@ -1098,7 +1115,8 @@ def pushplus_test():
     if success:
         return jsonify({"status": "success", "message": "测试通知已发送，请检查微信"})
     else:
-        return jsonify({"status": "error", "message": "发送失败，请检查 PUSHPLUS_TOKEN 是否正确"})
+        reason = get_pushplus_last_error() or '未知原因'
+        return jsonify({"status": "error", "message": f"发送失败: {reason}"})
 
 
 # ==================== 定时调度功能 ====================
@@ -1409,7 +1427,13 @@ def _notify_schedule_result(task, log_id, trigger_type):
     icon, status_text, status_color = status_meta.get(status, ('ℹ️', status, '#4b5563'))
     trigger_text = '手动触发' if trigger_type == 'manual' else '定时触发'
     mode_text = '1:1 镜像同步' if task.get('sync_mode') == 'mirror' else '按日期全量备份'
-    detail = html.escape(log.get('detail') or '无详细日志')
+    raw_detail = log.get('detail') or '无详细日志'
+    # PushPlus 对请求内容有长度限制。保留日志尾部（通常包含失败原因和汇总），
+    # 防止任务日志过长导致整条通知被接口拒绝。
+    max_detail_chars = 15000
+    if len(raw_detail) > max_detail_chars:
+        raw_detail = f'[详细日志过长，已省略前 {len(raw_detail) - max_detail_chars} 个字符]\n' + raw_detail[-max_detail_chars:]
+    detail = html.escape(raw_detail)
     summary = html.escape(log.get('message') or '无结果摘要')
     task_name = html.escape(task.get('name') or '')
     local_dir = html.escape(task.get('local_dir') or '')
@@ -1436,9 +1460,10 @@ def _notify_schedule_result(task, log_id, trigger_type):
     <p style="color:#999;font-size:12px">此消息由小雅资源助手自动发送</p>
     '''
     # 每个启用通知的任务都应收到结果，因此不使用 Token 告警的 5 分钟防抖。
-    return send_pushplus_notification(
+    sent = send_pushplus_notification(
         f'{icon} 小雅任务{status_text} - {task.get("name", "")}', content, throttle=False
     )
+    return sent, get_pushplus_last_error()
 
 
 # 注入上传函数并启动调度器
