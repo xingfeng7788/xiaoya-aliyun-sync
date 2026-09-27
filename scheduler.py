@@ -16,6 +16,7 @@ _scheduler = BackgroundScheduler(daemon=True)
 _upload_func = None  # 由 app.py 注入
 _token_check_func = None  # Token 检测函数，由 app.py 注入
 _token_refresh_func = None  # Token 刷新函数，由 app.py 注入
+_task_notify_func = None  # 任务完成通知函数，由 app.py 注入
 
 
 def set_upload_func(func):
@@ -34,6 +35,12 @@ def set_token_refresh_func(func):
     """注入 Token 刷新函数，签名: func() -> bool (True=成功)"""
     global _token_refresh_func
     _token_refresh_func = func
+
+
+def set_task_notify_func(func):
+    """注入任务完成通知函数，签名: func(task, log_id, trigger_type)。"""
+    global _task_notify_func
+    _task_notify_func = func
 
 
 def _run_task(task_id, trigger_type='cron'):
@@ -75,6 +82,17 @@ def _run_task(task_id, trigger_type='cron'):
         traceback.print_exc()
         append_schedule_log_detail(log_id, f"[ERROR] {str(e)}")
         update_schedule_log(log_id, 'failed', str(e))
+    finally:
+        # 通知统一放在 finally：成功、部分成功、校验失败及异常都能覆盖。
+        if task.get('notify_enabled') and _task_notify_func is not None:
+            try:
+                sent = _task_notify_func(task, log_id, trigger_type)
+                if not sent:
+                    append_schedule_log_detail(log_id, "[WARN] PushPlus 执行结果通知发送失败或未配置 Token")
+            except Exception as e:
+                # 通知失败不能反过来改变同步任务的执行结果。
+                print(f"任务 [{task['name']}] PushPlus 通知异常: {e}")
+                append_schedule_log_detail(log_id, f"[WARN] PushPlus 执行结果通知异常: {e}")
 
 
 def run_task_manual(task_id):

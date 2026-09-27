@@ -8,6 +8,7 @@ import uuid
 import secrets
 import _thread
 import hashlib
+import html
 
 import requests
 import qrcode
@@ -296,7 +297,7 @@ def _is_auth_error(e):
 _pushplus_last_notify_time = 0  # 防止短时间内重复发送
 
 
-def send_pushplus_notification(title, content):
+def send_pushplus_notification(title, content, throttle=True):
     """通过 PushPlus 发送通知"""
     global _pushplus_last_notify_time
     token = cfg('PUSHPLUS_TOKEN', '')
@@ -306,7 +307,7 @@ def send_pushplus_notification(title, content):
 
     # 防抖：5分钟内不重复发送同类通知
     now = time.time()
-    if now - _pushplus_last_notify_time < 300:
+    if throttle and now - _pushplus_last_notify_time < 300:
         print('PushPlus 通知发送过于频繁，跳过')
         return False
 
@@ -320,7 +321,10 @@ def send_pushplus_notification(title, content):
         }, timeout=10)
         result = resp.json()
         if result.get('code') == 200:
-            _pushplus_last_notify_time = now
+            # 只有需要防抖的 Token 告警才更新时间；任务结果通知互不抑制，
+            # 也不能导致紧随其后的 Token 失效告警被错误跳过。
+            if throttle:
+                _pushplus_last_notify_time = now
             print(f'PushPlus 通知发送成功: {title}')
             return True
         else:
@@ -1102,7 +1106,7 @@ def pushplus_test():
 from scheduler import (
     set_upload_func, start_scheduler, reload_all_tasks,
     add_task_job, remove_task_job, run_task_manual, get_job_next_run,
-    set_token_check_func, set_token_refresh_func
+    set_token_check_func, set_token_refresh_func, set_task_notify_func
 )
 import re
 from datetime import datetime, timedelta
@@ -1389,10 +1393,59 @@ def _refresh_token_task():
         return False
 
 
+def _notify_schedule_result(task, log_id, trigger_type):
+    """任务结束后发送状态摘要和完整执行日志；通知失败不影响任务状态。"""
+    log = get_schedule_log_detail(log_id)
+    if not log:
+        return False
+
+    status = log.get('status', 'failed')
+    status_meta = {
+        'success': ('✅', '执行成功', '#16a34a'),
+        'partial': ('⚠️', '部分成功', '#d97706'),
+        'failed': ('❌', '执行失败', '#dc2626'),
+        'running': ('⏳', '仍在执行', '#2563eb'),
+    }
+    icon, status_text, status_color = status_meta.get(status, ('ℹ️', status, '#4b5563'))
+    trigger_text = '手动触发' if trigger_type == 'manual' else '定时触发'
+    mode_text = '1:1 镜像同步' if task.get('sync_mode') == 'mirror' else '按日期全量备份'
+    detail = html.escape(log.get('detail') or '无详细日志')
+    summary = html.escape(log.get('message') or '无结果摘要')
+    task_name = html.escape(task.get('name') or '')
+    local_dir = html.escape(task.get('local_dir') or '')
+    remote_name = html.escape(task.get('remote_folder_name') or '')
+    started_at = html.escape(str(log.get('started_at') or ''))
+    finished_at = html.escape(str(log.get('finished_at') or ''))
+    host = cfg('XIAOYA_EXTERNAL_URL', '') or f'http://{HOST}:{PORT}'
+
+    content = f'''
+    <h2 style="color:{status_color}">{icon} 定时任务{status_text}</h2>
+    <table style="border-collapse:collapse;line-height:1.8">
+      <tr><td><b>任务名称：</b></td><td>{task_name}</td></tr>
+      <tr><td><b>触发方式：</b></td><td>{trigger_text}</td></tr>
+      <tr><td><b>同步模式：</b></td><td>{mode_text}</td></tr>
+      <tr><td><b>本地目录：</b></td><td>{local_dir}</td></tr>
+      <tr><td><b>云盘目标：</b></td><td>{remote_name}</td></tr>
+      <tr><td><b>开始时间：</b></td><td>{started_at}</td></tr>
+      <tr><td><b>结束时间：</b></td><td>{finished_at}</td></tr>
+      <tr><td><b>执行结果：</b></td><td>{summary}</td></tr>
+    </table>
+    <h3>执行详情</h3>
+    <pre style="white-space:pre-wrap;background:#f6f8fa;padding:12px;border-radius:6px">{detail}</pre>
+    <p><a href="{html.escape(host)}" target="_blank">打开小雅助手查看任务日志</a></p>
+    <p style="color:#999;font-size:12px">此消息由小雅资源助手自动发送</p>
+    '''
+    # 每个启用通知的任务都应收到结果，因此不使用 Token 告警的 5 分钟防抖。
+    return send_pushplus_notification(
+        f'{icon} 小雅任务{status_text} - {task.get("name", "")}', content, throttle=False
+    )
+
+
 # 注入上传函数并启动调度器
 set_upload_func(_execute_upload_task)
 set_token_check_func(_check_token_valid)
 set_token_refresh_func(_refresh_token_task)
+set_task_notify_func(_notify_schedule_result)
 start_scheduler()
 
 
@@ -1415,6 +1468,7 @@ def schedule_task_create():
     remote_folder_name = data.get('remote_folder_name', '根目录').strip()
     cron_expr = data.get('cron_expr', '').strip()
     sync_mode = data.get('sync_mode', 'snapshot').strip()
+    notify_enabled = 1 if data.get('notify_enabled', False) else 0
 
     if not name:
         return jsonify({"status": "error", "message": "任务名称不能为空"})
@@ -1432,7 +1486,10 @@ def schedule_task_create():
     except Exception as e:
         return jsonify({"status": "error", "message": f"无效的 Cron 表达式: {e}"})
 
-    task_id = create_schedule_task(name, local_dir, remote_folder_id, remote_folder_name, cron_expr, sync_mode)
+    task_id = create_schedule_task(
+        name, local_dir, remote_folder_id, remote_folder_name, cron_expr,
+        sync_mode, notify_enabled
+    )
     add_task_job(task_id, cron_expr)
     return jsonify({"status": "success", "message": "任务创建成功", "task_id": task_id})
 
@@ -1452,6 +1509,7 @@ def schedule_task_update(task_id):
     cron_expr = data.get('cron_expr', task['cron_expr']).strip()
     enabled = data.get('enabled', task['enabled'])
     sync_mode = data.get('sync_mode', task.get('sync_mode', 'snapshot')).strip()
+    notify_enabled = 1 if data.get('notify_enabled', task.get('notify_enabled', 0)) else 0
     if sync_mode not in ('snapshot', 'mirror'):
         return jsonify({"status": "error", "message": "无效的同步模式"})
 
@@ -1461,7 +1519,10 @@ def schedule_task_update(task_id):
     except Exception as e:
         return jsonify({"status": "error", "message": f"无效的 Cron 表达式: {e}"})
 
-    update_schedule_task(task_id, name, local_dir, remote_folder_id, remote_folder_name, cron_expr, enabled, sync_mode)
+    update_schedule_task(
+        task_id, name, local_dir, remote_folder_id, remote_folder_name,
+        cron_expr, enabled, sync_mode, notify_enabled
+    )
     if enabled:
         add_task_job(task_id, cron_expr)
     else:

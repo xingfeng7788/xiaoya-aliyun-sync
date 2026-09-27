@@ -47,6 +47,8 @@ def init_db():
             cron_expr TEXT NOT NULL,
             -- snapshot=按日期全量备份；mirror=以本地为准的 1:1 镜像同步
             sync_mode TEXT NOT NULL DEFAULT 'snapshot',
+            -- 是否在每次任务结束后通过 PushPlus 发送执行结果
+            notify_enabled INTEGER NOT NULL DEFAULT 0,
             enabled INTEGER NOT NULL DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -75,6 +77,8 @@ def init_db():
     task_columns = {row['name'] for row in conn.execute("PRAGMA table_info(schedule_task)").fetchall()}
     if 'sync_mode' not in task_columns:
         conn.execute("ALTER TABLE schedule_task ADD COLUMN sync_mode TEXT NOT NULL DEFAULT 'snapshot'")
+    if 'notify_enabled' not in task_columns:
+        conn.execute("ALTER TABLE schedule_task ADD COLUMN notify_enabled INTEGER NOT NULL DEFAULT 0")
     conn.commit()
     # 如果无用户则创建默认 admin
     _ensure_default_user(conn)
@@ -162,23 +166,26 @@ def sync_env_to_db():
 
 # ==================== 调度任务 CRUD ====================
 
-def create_schedule_task(name, local_dir, remote_folder_id, remote_folder_name, cron_expr, sync_mode='snapshot'):
+def create_schedule_task(name, local_dir, remote_folder_id, remote_folder_name, cron_expr,
+                         sync_mode='snapshot', notify_enabled=0):
     conn = get_conn()
     cur = conn.execute(
-        "INSERT INTO schedule_task (name, local_dir, remote_folder_id, remote_folder_name, cron_expr, sync_mode) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (name, local_dir, remote_folder_id, remote_folder_name, cron_expr, sync_mode)
+        "INSERT INTO schedule_task (name, local_dir, remote_folder_id, remote_folder_name, cron_expr, sync_mode, notify_enabled) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (name, local_dir, remote_folder_id, remote_folder_name, cron_expr, sync_mode, int(bool(notify_enabled)))
     )
     conn.commit()
     return cur.lastrowid
 
 
-def update_schedule_task(task_id, name, local_dir, remote_folder_id, remote_folder_name, cron_expr, enabled, sync_mode='snapshot'):
+def update_schedule_task(task_id, name, local_dir, remote_folder_id, remote_folder_name,
+                         cron_expr, enabled, sync_mode='snapshot', notify_enabled=0):
     conn = get_conn()
     conn.execute(
         "UPDATE schedule_task SET name=?, local_dir=?, remote_folder_id=?, remote_folder_name=?, "
-        "cron_expr=?, enabled=?, sync_mode=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
-        (name, local_dir, remote_folder_id, remote_folder_name, cron_expr, enabled, sync_mode, task_id)
+        "cron_expr=?, enabled=?, sync_mode=?, notify_enabled=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+        (name, local_dir, remote_folder_id, remote_folder_name, cron_expr, enabled,
+         sync_mode, int(bool(notify_enabled)), task_id)
     )
     conn.commit()
 
@@ -193,7 +200,7 @@ def delete_schedule_task(task_id):
 def get_all_schedule_tasks():
     conn = get_conn()
     rows = conn.execute(
-        "SELECT id, name, local_dir, remote_folder_id, remote_folder_name, cron_expr, sync_mode, enabled, created_at, updated_at "
+        "SELECT id, name, local_dir, remote_folder_id, remote_folder_name, cron_expr, sync_mode, notify_enabled, enabled, created_at, updated_at "
         "FROM schedule_task ORDER BY id"
     ).fetchall()
     return [dict(r) for r in rows]
@@ -202,7 +209,7 @@ def get_all_schedule_tasks():
 def get_schedule_task(task_id):
     conn = get_conn()
     row = conn.execute(
-        "SELECT id, name, local_dir, remote_folder_id, remote_folder_name, cron_expr, sync_mode, enabled, created_at, updated_at "
+        "SELECT id, name, local_dir, remote_folder_id, remote_folder_name, cron_expr, sync_mode, notify_enabled, enabled, created_at, updated_at "
         "FROM schedule_task WHERE id=?", (task_id,)
     ).fetchone()
     return dict(row) if row else None

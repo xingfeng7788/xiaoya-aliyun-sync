@@ -950,6 +950,13 @@
                                     </select>
                                     <p id="schSyncModeHint" class="mt-1 text-xs text-red-500 hidden">警告：云端目标目录中本地不存在的文件会被移入回收站，请为此任务选择专用目录。</p>
                                 </div>
+                                <label class="flex items-start gap-3 p-3 border rounded-lg bg-orange-50/50 cursor-pointer">
+                                    <input type="checkbox" id="schNotifyEnabled" class="mt-1 h-4 w-4 rounded border-gray-300 text-orange-600 focus:ring-orange-500">
+                                    <span>
+                                        <span class="block text-sm font-medium text-gray-700">通过 PushPlus 通知执行结果</span>
+                                        <span class="block text-xs text-gray-500 mt-0.5">任务结束后发送成功/失败状态、执行摘要和完整日志，需先在配置管理中设置 PushPlus Token。</span>
+                                    </span>
+                                </label>
                                 <div class="pt-2">
                                     <button onclick="saveTask()" class="w-full py-2.5 bg-green-600 text-white rounded-lg font-medium hover:bg-green-700 transition-colors"><i class="fas fa-save mr-1"></i>保存任务</button>
                                 </div>
@@ -1485,6 +1492,7 @@
                                     <div><i class="fas fa-cloud text-blue-500 mr-1 w-4"></i>${t.remote_folder_name}</div>
                                     <div><i class="fas fa-clock text-green-500 mr-1 w-4"></i><code class="bg-gray-100 px-1 rounded">${t.cron_expr}</code> ${nextRun}</div>
                                     <div><i class="fas fa-sync text-purple-500 mr-1 w-4"></i>${t.sync_mode === 'mirror' ? '1:1 镜像同步' : '按日期全量备份'}</div>
+                                    <div><i class="fas fa-bell ${t.notify_enabled ? 'text-orange-500' : 'text-gray-400'} mr-1 w-4"></i>执行通知：${t.notify_enabled ? '已开启' : '未开启'}</div>
                                 </div>
                             </div>
                             <div class="flex items-center gap-1 flex-shrink-0">
@@ -1513,6 +1521,7 @@
             document.getElementById('schRemoteName').textContent = taskData ? taskData.remote_folder_name : '根目录';
             document.getElementById('schCron').value = taskData ? taskData.cron_expr : '';
             document.getElementById('schSyncMode').value = taskData ? (taskData.sync_mode || 'snapshot') : 'snapshot';
+            document.getElementById('schNotifyEnabled').checked = taskData ? Boolean(taskData.notify_enabled) : false;
             updateSyncModeHint();
             document.getElementById('localDirPicker').classList.add('hidden');
             document.getElementById('remoteFolderPicker').classList.add('hidden');
@@ -1540,6 +1549,7 @@
                 remote_folder_name: document.getElementById('schRemoteName').textContent.trim(),
                 cron_expr: document.getElementById('schCron').value.trim(),
                 sync_mode: document.getElementById('schSyncMode').value,
+                notify_enabled: document.getElementById('schNotifyEnabled').checked,
             };
             if (!payload.name || !payload.local_dir || !payload.cron_expr) return alert('请填写所有必填项');
             if (payload.sync_mode === 'mirror' && !confirm('1:1 镜像同步会把云端目标目录中本地不存在的内容移入回收站。确认使用该目录进行镜像同步？')) return;
